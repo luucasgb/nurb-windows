@@ -38,6 +38,7 @@ import {
   type ProjectSummary,
 } from "@nurb/workbench/api";
 import { folders, isDraft, matchesSearch, partsIn, sortParts, titleCase, type LibrarySort } from "./parts";
+import { computer } from "./platform";
 
 const SORTS: Record<LibrarySort, string> = { built: "Last built", name: "Name" };
 const SORT_KEY = "nurb.librarySort";
@@ -624,7 +625,7 @@ export default function Library({
           onConfirm={() => void remove(confirm)}
           onCancel={() => setConfirm(null)}
         >
-          Its parts go with it. The folder on your Mac stays where it is.
+          Its parts go with it. The folder on your {computer} stays where it is.
         </ConfirmDialog>
       ) : null}
       {confirm && "part" in confirm ? (

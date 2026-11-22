@@ -530,7 +530,12 @@ mod tests {
             }
             let length: usize = head
                 .lines()
-                .find_map(|line| line.strip_prefix("Content-Length: "))
+                // Header names are case-insensitive. A body left unread makes
+                // Windows reset the connection on close, losing the answer.
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then_some(value)
+                })
                 .and_then(|value| value.trim().parse().ok())
                 .unwrap_or(0);
             let mut body = vec![0u8; length];

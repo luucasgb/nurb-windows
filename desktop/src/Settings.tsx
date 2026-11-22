@@ -36,6 +36,7 @@ import { readCrashReports, setCrashReports } from "./crashReports";
 import { syncWindowTheme } from "./windowTheme";
 import About from "./About";
 import { AGENT_LABEL } from "./Chat";
+import { computer } from "./platform";
 
 type SettingsAgent = {
   id: string;
@@ -83,9 +84,10 @@ type Props = {
 };
 
 // The slicer's path is a path; the person recognises the folder it sits in. For a Mac
-// app that is the folder holding the .app, not the bundle's own MacOS folder.
+// app that is the folder holding the .app, not the bundle's own MacOS folder. On
+// Windows it is the install folder, "Bambu Studio".
 function folderOf(path: string): string {
-  const parts = path.split("/").filter(Boolean);
+  const parts = path.split(/[\\/]/).filter(Boolean);
   const app = parts.findIndex((part) => part.endsWith(".app"));
   const at = app > 0 ? app - 1 : parts.length - 2;
   return at >= 0 ? parts[at] : path;
@@ -469,13 +471,13 @@ export default function Settings({
 
               {section === "general" ? (
                 <section className="flex flex-col gap-3.5 px-7 py-5.5">
-                  <SectionHead title="General" note="How nurb behaves on this Mac." />
+                  <SectionHead title="General" note={`How nurb behaves on this ${computer}.`} />
                   <div className="flex flex-col gap-2.5 border-y border-line-soft py-2.5">
                     <div className="flex items-center justify-between gap-6 border-b border-line-soft pb-2.5">
                       <div className="flex min-w-0 flex-col gap-0.5">
                         <span className="font-mono text-[11px] text-ink">Appearance</span>
                         <span className="text-[13.5px] leading-[18px] text-muted">
-                          System matches your Mac's light or dark setting.
+                          System matches your {computer}'s light or dark setting.
                         </span>
                       </div>
                       <SegmentedControl

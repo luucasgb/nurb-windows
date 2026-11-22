@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, IconButton, PanelStrip } from "@nurb/ui";
 import { AGENT_LABEL } from "./Chat";
+import { computer, isWindows } from "./platform";
 
 type MissingAgent = {
   id: string;
@@ -123,7 +124,7 @@ export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props)
                   autoFocus
                 />
                 <div className="flex items-center justify-between gap-4">
-                  <span className="mono-caption text-muted">Stored in your Mac's keychain</span>
+                  <span className="mono-caption text-muted">{isWindows ? "Stored in Windows Credential Manager" : "Stored in your Mac's keychain"}</span>
                   <button
                     type="button"
                     className="chrome mono-caption shrink-0 font-medium text-accent-ink transition-colors hover:text-accent"
@@ -138,7 +139,7 @@ export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props)
 
           {missing.length === 0 && !onSubmitGeminiKey ? (
             <p className="text-[13.5px] leading-[18px] text-muted">
-              Every agent nurb works with is already on this Mac.
+              Every agent nurb works with is already on this {computer}.
             </p>
           ) : null}
 

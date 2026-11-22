@@ -387,9 +387,7 @@ impl Chats {
     pub fn shutdown(&self) {
         let sessions = std::mem::take(&mut *self.sessions.lock().unwrap());
         for session in sessions.values() {
-            unsafe {
-                libc::killpg(session.pgid, libc::SIGTERM);
-            }
+            crate::platform::killpg(session.pgid, crate::platform::SIGTERM);
         }
     }
 }
@@ -785,10 +783,14 @@ fn attachment_block(path: &std::path::Path) -> Result<ContentBlock, String> {
     let Some((mime, data)) = attached_image(path, &name)? else {
         // A folder is not copied whole; the agent reads it where it is, if it can.
         let target = if path.is_dir() { path.to_path_buf() } else { readable_copy(path, &name)? };
-        return Ok(ContentBlock::ResourceLink(ResourceLink::new(
-            name,
-            format!("file://{}", target.display()),
-        )));
+        // A Windows path becomes file:///C:/... with forward slashes.
+        let shown = target.display().to_string();
+        let uri = if cfg!(windows) {
+            format!("file:///{}", shown.replace('\\', "/"))
+        } else {
+            format!("file://{shown}")
+        };
+        return Ok(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
     };
     use base64::Engine;
     Ok(ContentBlock::Image(ImageContent::new(
@@ -952,6 +954,10 @@ pub(crate) fn attached_image(
 }
 
 fn converted_to_jpeg(path: &std::path::Path, name: &str) -> Result<Vec<u8>, String> {
+    // The conversion is macOS's sips; Windows has no stock equivalent yet.
+    if cfg!(windows) {
+        return Err(format!("cannot read {name}: on Windows, attach photos as PNG or JPEG"));
+    }
     let dir = attachment_dir(name)?;
     let out = dir.join("converted.jpg");
     let converted = std::process::Command::new("/usr/bin/sips")
@@ -2213,16 +2219,12 @@ pub(crate) fn session_to_remove(
 /// SIGTERM the adapter's process group and reap the child, escalating to
 /// SIGKILL if it lingers.
 async fn reap(pgid: i32, mut child: async_process::Child) {
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
+    crate::platform::killpg(pgid, crate::platform::SIGTERM);
     if tokio::time::timeout(Duration::from_secs(5), child.status())
         .await
         .is_err()
     {
-        unsafe {
-            libc::killpg(pgid, libc::SIGKILL);
-        }
+        crate::platform::killpg(pgid, crate::platform::SIGKILL);
         let _ = child.status().await;
     }
 }
@@ -2253,8 +2255,9 @@ fn drain_stderr(kind: AgentKind, stderr: async_process::ChildStderr) {
 fn friendly(kind: AgentKind, error: agent_client_protocol::Error) -> String {
     if error.code == ErrorCode::AuthRequired || error.message.contains("Failed to authenticate") {
         format!(
-            "auth_required: {} is not signed in on this Mac",
-            kind.label()
+            "auth_required: {} is not signed in on this {}",
+            kind.label(),
+            if cfg!(windows) { "computer" } else { "Mac" }
         )
     } else {
         format!("{} error: {}", kind.label(), error.message)
@@ -2527,6 +2530,9 @@ mod tests {
             ContentBlock::ResourceLink(link) => {
                 assert_eq!(link.name, "My Bracket (v2).3mf");
                 let copy = link.uri.strip_prefix("file://").unwrap();
+                // file:///C:/x on Windows names C:\x.
+                #[cfg(windows)]
+                let copy = &copy[1..].replace('/', "\\");
                 assert_ne!(std::path::Path::new(copy), spaced);
                 assert!(copy.starts_with(&*std::env::temp_dir().to_string_lossy()));
                 assert!(!copy.contains(' '), "{copy}");
@@ -2536,24 +2542,28 @@ mod tests {
         }
 
         // A format no prompt takes arrives as a JPEG, not as a link to itself.
-        use base64::Engine;
-        let tiny = base64::engine::general_purpose::STANDARD
-            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
-            .unwrap();
-        let png = scratch("tiny.png", &tiny);
-        let tiff = png.with_file_name("tiny.tiff");
-        assert!(std::process::Command::new("/usr/bin/sips")
-            .args(["-s", "format", "tiff"])
-            .arg(&png)
-            .arg("--out")
-            .arg(&tiff)
-            .output()
-            .unwrap()
-            .status
-            .success());
-        match attachment_block(&tiff).unwrap() {
-            ContentBlock::Image(image) => assert_eq!(image.mime_type, "image/jpeg"),
-            other => panic!("expected an image block, got {other:?}"),
+        // (The conversion is macOS's sips.)
+        #[cfg(not(windows))]
+        {
+            use base64::Engine;
+            let tiny = base64::engine::general_purpose::STANDARD
+                .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+                .unwrap();
+            let png = scratch("tiny.png", &tiny);
+            let tiff = png.with_file_name("tiny.tiff");
+            assert!(std::process::Command::new("/usr/bin/sips")
+                .args(["-s", "format", "tiff"])
+                .arg(&png)
+                .arg("--out")
+                .arg(&tiff)
+                .output()
+                .unwrap()
+                .status
+                .success());
+            match attachment_block(&tiff).unwrap() {
+                ContentBlock::Image(image) => assert_eq!(image.mime_type, "image/jpeg"),
+                other => panic!("expected an image block, got {other:?}"),
+            }
         }
         let broken = scratch("broken.heic", b"not a photo");
         assert!(attachment_block(&broken).unwrap_err().contains("broken.heic"));
@@ -2573,7 +2583,13 @@ mod tests {
         let folder = spaced.parent().unwrap();
         match attachment_block(folder).unwrap() {
             ContentBlock::ResourceLink(link) => {
-                assert_eq!(link.uri, format!("file://{}", folder.display()));
+                let shown = folder.display().to_string();
+                let expected = if cfg!(windows) {
+                    format!("file:///{}", shown.replace('\\', "/"))
+                } else {
+                    format!("file://{shown}")
+                };
+                assert_eq!(link.uri, expected);
             }
             other => panic!("expected a resource link, got {other:?}"),
         }

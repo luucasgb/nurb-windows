@@ -4,7 +4,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::crash;
+use crate::platform::OwnGroup;
 
 const DEFAULT_PORT: u16 = 7373;
 // The first request absorbs the cold OCCT import, which alone takes ~45 seconds
@@ -277,7 +277,7 @@ impl Supervisor {
             .stderr(Stdio::piped())
             // Its own process group, so killing it takes the whole uv ->
             // python tree rather than orphaning the server.
-            .process_group(0);
+            .own_group();
         if let Some(home) = &self.home {
             std::fs::create_dir_all(home)
                 .map_err(|e| format!("could not create {}: {e}", home.display()))?;
@@ -443,9 +443,7 @@ fn default_home() -> PathBuf {
     }
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
+        .unwrap_or_else(|| crate::platform::home().unwrap_or_default().join(".config"));
     config.join("nurb")
 }
 
@@ -497,9 +495,21 @@ fn stale_orphan(info: &ServeInfo, version: &str) -> bool {
     let reported = reported
         .as_ref()
         .and_then(|health| health.get("version")?.as_str());
-    reported != Some(version) && parent_pid(info.pid) == Some(1)
+    reported != Some(version) && orphaned(info.pid)
 }
 
+#[cfg(unix)]
+fn orphaned(pid: u32) -> bool {
+    parent_pid(pid) == Some(1)
+}
+
+/// Windows never reparents: an orphan is a serve whose parent is gone.
+#[cfg(windows)]
+fn orphaned(pid: u32) -> bool {
+    crate::platform::orphaned(pid)
+}
+
+#[cfg(unix)]
 fn parent_pid(pid: u32) -> Option<u32> {
     let out = std::process::Command::new("/bin/ps")
         .args(["-o", "ppid=", "-p", &pid.to_string()])
@@ -512,20 +522,17 @@ fn parent_pid(pid: u32) -> Option<u32> {
 /// replacement needs and it goes with the process. If this somehow fails, the
 /// replacement exits at the lock and the old serve is adopted, as before.
 fn stop_serve(pid: u32) {
+    use crate::platform::{alive, kill, SIGKILL, SIGTERM};
     let pid = pid as i32;
     let gone_within = |tries: u32| {
         (0..tries).any(|_| {
             thread::sleep(Duration::from_millis(100));
-            unsafe { libc::kill(pid, 0) != 0 }
+            !alive(pid)
         })
     };
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
+    kill(pid, SIGTERM);
     if !gone_within(20) {
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
+        kill(pid, SIGKILL);
         gone_within(20);
     }
 }
@@ -599,9 +606,7 @@ fn kill_tree(child: &ManagedChild) {
         return;
     }
     let pgid = state.process.id() as i32;
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-    }
+    crate::platform::killpg(pgid, crate::platform::SIGTERM);
     for _ in 0..20 {
         if matches!(state.process.try_wait(), Ok(Some(_))) {
             state.stopped = true;
@@ -609,9 +614,7 @@ fn kill_tree(child: &ManagedChild) {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    }
+    crate::platform::killpg(pgid, crate::platform::SIGKILL);
     let _ = state.process.wait();
     state.stopped = true;
 }
@@ -619,6 +622,9 @@ fn kill_tree(child: &ManagedChild) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+    #[cfg(unix)]
     use std::process::Command;
     use std::sync::atomic::AtomicU64;
 
@@ -699,6 +705,7 @@ mod tests {
 
     /// A stand-in serve answering /health, its port returned once it is listening.
     /// `orphan` leaves it with launchd as its parent, as a crashed app does.
+    #[cfg(unix)]
     fn fake_serve(version: Option<&str>, orphan: bool, ignores_term: bool) -> (u32, u16) {
         let dir = std::env::temp_dir().join(format!(
             "nurb-fake-serve-{}-{}",
@@ -771,6 +778,7 @@ server.serve_forever()
         }
     }
 
+    #[cfg(unix)]
     fn running(pid: u32) -> bool {
         unsafe { libc::kill(pid as i32, 0) == 0 }
     }
@@ -778,6 +786,7 @@ server.serve_forever()
     // Only a leftover from a dead app on the wrong version is replaced. A serve
     // with a living parent belongs to someone: a terminal, or another build of
     // the app sharing this home.
+    #[cfg(unix)]
     #[test]
     fn only_an_orphan_on_another_version_is_stale() {
         let serves = [
@@ -806,6 +815,7 @@ server.serve_forever()
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn stopping_a_serve_outlasts_one_that_ignores_sigterm() {
         let (polite, _) = fake_serve(None, true, false);
@@ -817,6 +827,7 @@ server.serve_forever()
         assert!(!running(stubborn));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_failed_probe_says_how_it_failed() {
         // A port that accepts and never answers: the probe times out, and says so
@@ -854,6 +865,7 @@ server.serve_forever()
         stop_serve(other);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_slow_answer_from_our_own_serve_does_not_get_it_killed() {
         // A health server that takes a second to answer, longer than one probe
@@ -904,6 +916,7 @@ server.serve_forever()
         let _ = std::fs::remove_dir_all(home);
     }
 
+    #[cfg(unix)]
     #[test]
     fn shutdown_kills_a_serve_that_is_still_starting() {
         let process = Command::new("sh")

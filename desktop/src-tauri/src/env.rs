@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::agents::AgentKind;
+use crate::platform::NoWindow;
 
 /// The Node runtime the provisioner installs. The adapters need >= 22; this
 /// is the current LTS, pinned with its published tarball checksums so the
@@ -106,9 +107,9 @@ impl Launcher {
         match self {
             Self::Checkout { .. } => None,
             Self::Provisioned { paths } => Some(format!(
-                "{}:{}:{}",
-                paths.venv().join("bin").display(),
-                paths.node_dir().join("bin").display(),
+                "{}{SEP}{}{SEP}{}",
+                paths.venv_bin().display(),
+                paths.node_bin().parent().unwrap_or(&paths.node_dir()).display(),
                 user_path(),
             )),
         }
@@ -131,8 +132,10 @@ impl Launcher {
             return kind.native_bin().is_some();
         }
         match self {
-            Self::Checkout { .. } => Command::new("npx")
+            // npx is npx.cmd on Windows, which a bare name never finds.
+            Self::Checkout { .. } => Command::new(if cfg!(windows) { "npx.cmd" } else { "npx" })
                 .arg("--version")
+                .no_window()
                 .output()
                 .map(|out| out.status.success())
                 .unwrap_or(false),
@@ -173,22 +176,36 @@ impl Paths {
         self.data.join("env")
     }
 
+    /// The venv's executables: `bin/` on macOS, `Scripts\` on Windows.
+    pub fn venv_bin(&self) -> PathBuf {
+        self.venv().join(if cfg!(windows) { "Scripts" } else { "bin" })
+    }
+
     pub fn venv_python(&self) -> PathBuf {
-        self.venv().join("bin/python")
+        self.venv_bin().join(crate::platform::exe("python"))
     }
 
     pub fn node_dir(&self) -> PathBuf {
         self.data.join("node")
     }
 
+    /// The Windows zip keeps node.exe at its root; the macOS tarball under bin/.
     pub fn node_bin(&self) -> PathBuf {
-        self.node_dir().join("bin/node")
+        if cfg!(windows) {
+            self.node_dir().join("node.exe")
+        } else {
+            self.node_dir().join("bin/node")
+        }
     }
 
     /// npm as shipped inside the Node tarball, invoked through its JS entry
     /// so nothing depends on PATH.
     pub fn npm_cli(&self) -> PathBuf {
-        self.node_dir().join("lib/node_modules/npm/bin/npm-cli.js")
+        if cfg!(windows) {
+            self.node_dir().join("node_modules/npm/bin/npm-cli.js")
+        } else {
+            self.node_dir().join("lib/node_modules/npm/bin/npm-cli.js")
+        }
     }
 
     pub fn adapters(&self) -> PathBuf {
@@ -196,9 +213,9 @@ impl Paths {
     }
 
     pub fn adapter_script(&self, kind: AgentKind) -> PathBuf {
-        self.adapters()
-            .join("node_modules/.bin")
-            .join(kind.adapter_bin().expect("adapter-hosted"))
+        let pin = kind.adapter().expect("adapter-hosted");
+        let package = pin.rsplit_once('@').map_or(pin, |(package, _)| package);
+        self.npm_bin(package, kind.adapter_bin().expect("adapter-hosted"))
     }
 
     /// The Codex CLI npm installs as a dependency of the Codex adapter.
@@ -206,12 +223,66 @@ impl Paths {
     /// login path spawns a bare `codex` off PATH instead, so the app has to
     /// name it. See `CODEX_PATH` in agents.rs.
     pub fn codex_cli(&self) -> PathBuf {
-        self.adapters().join("node_modules/.bin/codex")
+        self.npm_bin("@openai/codex", "codex")
+    }
+
+    /// What `CODEX_PATH` names for codex-acp's login, which starts it as a
+    /// program: the `.bin/codex` link on macOS. On Windows a JS file is not a
+    /// program, so it is the native codex.exe that @openai/codex's Windows
+    /// package ships, found wherever that package keeps it.
+    pub fn codex_exe(&self) -> PathBuf {
+        #[cfg(windows)]
+        if let Some(exe) = find_file(&self.adapters().join("node_modules/@openai"), "codex.exe", 6) {
+            return exe;
+        }
+        self.codex_cli()
+    }
+
+    /// The script behind an npm bin. On macOS `.bin/<name>` is a symlink to
+    /// it. On Windows npm writes shell and cmd shims there instead, which
+    /// `node` cannot run, so the script is read from the package's own
+    /// manifest; `.bin/<name>` stays the answer when that fails, so the
+    /// missing-file error names the familiar path.
+    fn npm_bin(&self, package: &str, bin: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let dir = self.adapters().join("node_modules").join(package);
+            let script = std::fs::read(dir.join("package.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|manifest| match &manifest["bin"] {
+                    serde_json::Value::String(script) => Some(script.clone()),
+                    serde_json::Value::Object(bins) => bins.get(bin)?.as_str().map(String::from),
+                    _ => None,
+                });
+            if let Some(script) = script {
+                return dir.join(script);
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = package;
+        self.adapters().join("node_modules/.bin").join(bin)
     }
 
     pub fn stamp(&self) -> PathBuf {
         self.data.join("provisioned.json")
     }
+}
+
+/// The first file called `name` under `dir`, at most `depth` folders down.
+#[cfg(windows)]
+fn find_file(dir: &std::path::Path, name: &str, depth: u32) -> Option<PathBuf> {
+    let entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+    if let Some(hit) = entries.iter().find(|e| e.file_name() == name && e.path().is_file()) {
+        return Some(hit.path());
+    }
+    if depth == 0 {
+        return None;
+    }
+    entries
+        .iter()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .find_map(|e| find_file(&e.path(), name, depth - 1))
 }
 
 /// The PATH the user's own terminal has. An app opened from Finder or the Dock
@@ -222,22 +293,49 @@ impl Paths {
 /// Homebrew prefixes are appended as a cheap fallback for a shell that fails,
 /// hangs, or prints nothing parseable. Resolved on first use, which launch
 /// warms from a background thread so the first status check rarely waits.
+///
+/// Windows hands every app the PATH Explorer had at sign-in, which misses a CLI
+/// installed since; the registry holds the current one, so it leads there.
 pub fn user_path() -> &'static str {
     static USER_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     USER_PATH.get_or_init(|| {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-        merge_path(
-            shell_path(&shell, std::time::Duration::from_secs(3)).as_deref(),
-            std::env::var("PATH").ok().as_deref(),
-        )
+        #[cfg(unix)]
+        let first = {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+            shell_path(&shell, std::time::Duration::from_secs(3))
+        };
+        #[cfg(windows)]
+        let first = registry_path();
+        merge_path(first.as_deref(), std::env::var("PATH").ok().as_deref())
     })
 }
 
+/// PATH's separator.
+pub const SEP: char = if cfg!(windows) { ';' } else { ':' };
+
+/// The machine's PATH then the user's, as Windows itself joins them for a new
+/// sign-in.
+#[cfg(windows)]
+fn registry_path() -> Option<String> {
+    use crate::platform::windows::registry_string;
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let machine = registry_string(
+        HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        "Path",
+    );
+    let user = registry_string(HKEY_CURRENT_USER, "Environment", "Path");
+    let joined: Vec<String> = [machine, user].into_iter().flatten().collect();
+    (!joined.is_empty()).then(|| joined.join(";"))
+}
+
+#[cfg(unix)]
 const PATH_MARK: &str = "__NURB_PATH__";
 
 /// `$PATH` as an interactive login shell sees it, or None when the shell
 /// fails or outlasts the timeout. The markers fence the value off from
 /// anything the user's rc files print.
+#[cfg(unix)]
 fn shell_path(shell: &str, timeout: std::time::Duration) -> Option<String> {
     use std::os::unix::process::CommandExt;
     let child = Command::new(shell)
@@ -271,20 +369,28 @@ fn shell_path(shell: &str, timeout: std::time::Duration) -> Option<String> {
 }
 
 /// The shell's PATH first, then the app's own, then the Homebrew prefixes,
-/// with repeats and empty entries dropped.
+/// with repeats and empty entries dropped. (Windows: the registry's PATH, then
+/// the app's own, its folders compared without case or a trailing slash.)
 fn merge_path(shell: Option<&str>, inherited: Option<&str>) -> String {
     let mut dirs: Vec<&str> = Vec::new();
-    let fallback = "/opt/homebrew/bin:/usr/local/bin";
+    let fallback = if cfg!(windows) { "" } else { "/opt/homebrew/bin:/usr/local/bin" };
+    let same = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.trim_end_matches('\\').eq_ignore_ascii_case(b.trim_end_matches('\\'))
+        } else {
+            a == b
+        }
+    };
     for dir in [shell, inherited, Some(fallback)]
         .into_iter()
         .flatten()
-        .flat_map(|path| path.split(':'))
+        .flat_map(|path| path.split(SEP))
     {
-        if !dir.is_empty() && !dirs.contains(&dir) {
+        if !dir.is_empty() && !dirs.iter().any(|known| same(known, dir)) {
             dirs.push(dir);
         }
     }
-    dirs.join(":")
+    dirs.join(&SEP.to_string())
 }
 
 /// The bundled uv sidecar: Tauri strips the target-triple suffix and places
@@ -298,7 +404,7 @@ pub fn uv_sidecar() -> Result<PathBuf, String> {
     } else {
         dir
     };
-    let uv = dir.join("uv");
+    let uv = dir.join(crate::platform::exe("uv"));
     if uv.is_file() {
         Ok(uv)
     } else {
@@ -306,7 +412,7 @@ pub fn uv_sidecar() -> Result<PathBuf, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::time::{Duration, Instant};
 

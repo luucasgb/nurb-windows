@@ -20,6 +20,7 @@ use tokio::sync::oneshot;
 use crate::acp::events::{capped, mirror, ChatEvent};
 use crate::acp::sandbox;
 use crate::agents::AgentKind;
+use crate::platform::{NoWindow, OwnGroup};
 use crate::prefs::{ConfigChoice, ConfigRow, PrefStore};
 
 /// The oldest CLI whose print mode waits for its MCP servers before the first
@@ -99,7 +100,7 @@ impl Drivers {
 
     pub(crate) fn remove(&self, session_id: &str) {
         if let Some(session) = self.sessions.lock().unwrap().remove(session_id) {
-            session.signal(libc::SIGTERM);
+            session.signal(crate::platform::SIGTERM);
         }
     }
 
@@ -107,20 +108,15 @@ impl Drivers {
     /// teardown may never run.
     pub fn shutdown(&self) {
         for session in std::mem::take(&mut *self.sessions.lock().unwrap()).values() {
-            session.signal(libc::SIGTERM);
+            session.signal(crate::platform::SIGTERM);
         }
     }
 }
 
 impl Session {
     fn signal(&self, signal: i32) {
-        // A pgid of 0 would be the app's own group.
-        let pgid = self.pgid.load(Ordering::SeqCst);
-        if pgid > 0 {
-            unsafe {
-                libc::killpg(pgid, signal);
-            }
-        }
+        // A pgid of 0 would be the app's own group; killpg refuses it.
+        crate::platform::killpg(self.pgid.load(Ordering::SeqCst), signal);
     }
 
     /// One user turn: the prompt goes in as a single stream-json line, and the
@@ -163,7 +159,7 @@ impl Session {
     /// The session itself survives on disk and the next message resumes it.
     pub(crate) fn cancel(&self) {
         self.stopped.store(true, Ordering::SeqCst);
-        self.signal(libc::SIGINT);
+        self.signal(crate::platform::SIGINT);
     }
 }
 
@@ -534,7 +530,7 @@ pub(crate) fn spawn_args(
     args
 }
 
-/// The child, under the same Seatbelt profile every agent runs in.
+/// The child, under the same OS sandbox every agent runs in.
 pub(crate) fn spawn(
     bin: &Path,
     args: Vec<String>,
@@ -556,7 +552,7 @@ pub(crate) fn spawn(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .process_group(0)
+        .own_group()
         .spawn()
         .map_err(|e| format!("could not start Claude: {e}"))
 }
@@ -568,6 +564,7 @@ fn ready_binary() -> Result<PathBuf, String> {
     let version = std::process::Command::new(&bin)
         .arg("--version")
         .env("PATH", crate::env::user_path())
+        .no_window()
         .output()
         .ok()
         .and_then(|out| String::from_utf8(out.stdout).ok())
@@ -579,6 +576,7 @@ fn ready_binary() -> Result<PathBuf, String> {
     let signed_in = std::process::Command::new(&bin)
         .args(["auth", "status"])
         .env("PATH", crate::env::user_path())
+        .no_window()
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false);
@@ -750,7 +748,7 @@ async fn read_stream(
                     if is_error && looks_signed_out(&text) {
                         reported = true;
                         send(channel, ChatEvent::SessionError { message: "auth_required".into() });
-                        session.signal(libc::SIGTERM);
+                        session.signal(crate::platform::SIGTERM);
                     } else if is_error && !stopped {
                         let text = if text.is_empty() {
                             "Claude hit an error and stopped this turn.".to_string()
@@ -795,7 +793,7 @@ async fn start_over(
     fresh: &impl Fn() -> Result<Child, String>,
 ) -> Result<tokio::process::ChildStdout, String> {
     let mut pipe = session.pipe.lock().await;
-    session.signal(libc::SIGTERM);
+    session.signal(crate::platform::SIGTERM);
     let _ = child.wait().await;
     let mut next = fresh()?;
     let stdin = next.stdin.take().ok_or("Claude has no input pipe")?;
@@ -908,6 +906,7 @@ mod tests {
         assert_eq!(blocks.as_array().unwrap().last().unwrap()["text"], note);
     }
     use serde_json::Value;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, AtomicI32};
@@ -1099,6 +1098,8 @@ mod tests {
     const GONE: &str = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"stop_reason":null,"session_id":"sid","errors":["No conversation found with session ID: sid"]}"#;
 
     /// A driver session on a fake CLI, with the events it sends collected.
+    /// The fakes are shell scripts, so these run where /bin/sh does.
+    #[cfg(unix)]
     async fn fake_session(
         dir: &Path,
         script: &str,
@@ -1158,6 +1159,7 @@ mod tests {
     /// Issue #331: every send failed forever once the transcript was cleaned
     /// up. The resume fails, a fresh child takes the same id, and the prompt
     /// that was waiting is the one it answers.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_resume_of_a_lost_session_starts_fresh_and_answers_the_prompt() {
         let dir = std::env::temp_dir().join(format!("nurb-claude-gone-{}", std::process::id()));
@@ -1177,7 +1179,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<Value>(&received).unwrap()["message"]["content"], "taller");
         assert_eq!(notes(&seen), vec![super::RESTORE_FAILED.to_string()]);
         assert!(!seen.lock().unwrap().iter().any(|event| event["type"] == "session_error"), "{seen:?}");
-        session.signal(libc::SIGTERM);
+        session.signal(crate::platform::SIGTERM);
         task.await.unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1185,6 +1187,7 @@ mod tests {
     /// Issue #390: a token revoked on claude.ai still passes `claude auth
     /// status`, so the first sign of it is a failed turn. It has to reach the
     /// column as signed out, or the person gets the raw error and no way on.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_revoked_token_ends_the_session_as_signed_out() {
         let dir = std::env::temp_dir().join(format!("nurb-claude-revoked-{}", std::process::id()));
@@ -1209,6 +1212,7 @@ mod tests {
 
     /// The same words from a child that was not resuming are not a lost
     /// transcript, and starting over there would loop for good.
+    #[cfg(unix)]
     #[tokio::test]
     async fn only_a_resume_starts_over() {
         let dir = std::env::temp_dir().join(format!("nurb-claude-noloop-{}", std::process::id()));
@@ -1224,6 +1228,7 @@ mod tests {
 
     /// The spawn path end to end against a fake CLI: the sandbox wrapper, the
     /// stdin line, and the recorded stream back out as events.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_turn_runs_against_a_fake_cli() {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

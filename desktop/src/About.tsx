@@ -5,6 +5,7 @@ import { brand, Button, Icon } from "@nurb/ui";
 import lgpl from "./licenses/OCCT_LICENSE_LGPL_21.txt?raw";
 import occtException from "./licenses/OCCT_LGPL_EXCEPTION.txt?raw";
 import uvMit from "./licenses/UV_LICENSE_MIT.txt?raw";
+import { osName } from "./platform";
 
 type Props = {
   appVersion: string;
@@ -66,7 +67,7 @@ export default function About({
     `app ${appVersion}`,
     `CAD engine ${nurbVersion}`,
     occtVersion ? `OCCT ${occtVersion}` : null,
-    `macOS ${osVersion} (${arch})`,
+    `${osName(osVersion)} (${arch})`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -83,7 +84,7 @@ export default function About({
     `Version ${appVersion}`,
     `Engine ${nurbVersion}`,
     occtVersion ? `Kernel OCCT ${occtVersion}` : null,
-    `macOS ${osVersion}`,
+    osName(osVersion),
     arch,
   ]
     .filter(Boolean)

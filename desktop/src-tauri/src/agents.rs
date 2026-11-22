@@ -10,9 +10,14 @@
 //! shares credentials with any terminal install either way, because every
 //! agent reads its own store (~/.claude, ~/.codex, Cursor's, ~/.grok).
 
+#[cfg(not(windows))]
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(windows))]
+use std::process::Stdio;
+
+use crate::platform::NoWindow;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -116,7 +121,7 @@ impl AgentKind {
             Self::Grok => &[".grok/bin"],
             Self::Codex | Self::Gemini => return None,
         };
-        let home = PathBuf::from(std::env::var("HOME").ok()?);
+        let home = crate::platform::home()?;
         find_bin(name, &home, install_dirs, Some(crate::env::user_path().into()))
     }
 
@@ -135,6 +140,14 @@ impl AgentKind {
     /// Only the native CLIs have one; the adapter-hosted pair arrive with the
     /// app and are never absent outside a broken dev machine.
     pub fn install_command(self) -> Option<&'static str> {
+        #[cfg(windows)]
+        return match self {
+            // PowerShell, the vendors' own Windows one-liners.
+            Self::Claude => Some("irm https://claude.ai/install.ps1 | iex"),
+            Self::Cursor => Some("irm 'https://cursor.com/install?win32=true' | iex"),
+            Self::Grok | Self::Codex | Self::Gemini => None,
+        };
+        #[cfg(not(windows))]
         match self {
             Self::Claude => Some("curl -fsSL https://claude.ai/install.sh | bash"),
             Self::Cursor => Some("curl https://cursor.com/install -fsSL | bash"),
@@ -150,14 +163,16 @@ fn find_bin(
     install_dirs: &[&str],
     path: Option<std::ffi::OsString>,
 ) -> Option<PathBuf> {
+    // `claude.exe` on Windows, where only an .exe can be started directly.
+    let name = crate::platform::exe(name);
     for dir in install_dirs {
-        let default = home.join(dir).join(name);
+        let default = home.join(dir).join(&name);
         if default.is_file() {
             return Some(default);
         }
     }
     std::env::split_paths(&path?)
-        .map(|dir| dir.join(name))
+        .map(|dir| dir.join(&name))
         .find(|candidate| candidate.is_file())
 }
 
@@ -234,6 +249,7 @@ fn driver_auth_status() -> (Option<bool>, Option<String>) {
     let Ok(output) = Command::new(bin)
         .args(["auth", "status", "--json"])
         .env("PATH", crate::env::user_path())
+        .no_window()
         .output() else {
         return (None, None);
     };
@@ -262,13 +278,14 @@ fn auth_file(dir: &str) -> PathBuf {
     } else {
         None
     };
-    home.unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(dir))
+    home.unwrap_or_else(|| crate::platform::home().unwrap_or_default().join(dir))
         .join("auth.json")
 }
 
 const GEMINI_KEYCHAIN_SERVICE: &str = "dev.nurb.desktop.gemini-api-key";
 const GEMINI_KEYCHAIN_ACCOUNT: &str = "gemini";
 
+#[cfg(not(windows))]
 pub(crate) fn gemini_api_key() -> Result<String, String> {
     let output = Command::new("/usr/bin/security")
         .args([
@@ -295,6 +312,7 @@ pub(crate) fn gemini_api_key() -> Result<String, String> {
     }
 }
 
+#[cfg(not(windows))]
 fn save_gemini_api_key(key: &str) -> Result<(), String> {
     let key = security_interactive_argument(key)?;
     let command = format!(
@@ -320,6 +338,7 @@ fn save_gemini_api_key(key: &str) -> Result<(), String> {
         .ok_or_else(|| "macOS Keychain did not save the Gemini API key".into())
 }
 
+#[cfg(not(windows))]
 fn security_interactive_argument(value: &str) -> Result<String, String> {
     if value.contains(['\r', '\n']) {
         return Err("Gemini API key contains an invalid line break".into());
@@ -328,6 +347,74 @@ fn security_interactive_argument(value: &str) -> Result<String, String> {
         "\"{}\"",
         value.replace('\\', "\\\\").replace('"', "\\\"")
     ))
+}
+
+/// Windows keeps the key in Credential Manager, its Keychain: a generic
+/// credential under the same service name, readable only by this user.
+#[cfg(windows)]
+pub(crate) fn gemini_api_key() -> Result<String, String> {
+    use crate::platform::windows::wide;
+    use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
+    let target = wide(std::ffi::OsStr::new(GEMINI_KEYCHAIN_SERVICE));
+    let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
+    if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
+        return Err("Gemini API key not found".into());
+    }
+    let bytes = unsafe {
+        let blob = &*credential;
+        let bytes = if blob.CredentialBlob.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(blob.CredentialBlob, blob.CredentialBlobSize as usize).to_vec()
+        };
+        CredFree(credential.cast());
+        bytes
+    };
+    let key = String::from_utf8(bytes)
+        .map_err(|_| "the Gemini API key is not valid text".to_string())?
+        .trim()
+        .to_string();
+    if key.is_empty() {
+        Err("Gemini API key is empty".into())
+    } else {
+        Ok(key)
+    }
+}
+
+#[cfg(windows)]
+fn save_gemini_api_key(key: &str) -> Result<(), String> {
+    use crate::platform::windows::wide;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::Security::Credentials::{
+        CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+    };
+    let mut target = wide(std::ffi::OsStr::new(GEMINI_KEYCHAIN_SERVICE));
+    let mut account = wide(std::ffi::OsStr::new(GEMINI_KEYCHAIN_ACCOUNT));
+    let blob = key.as_bytes();
+    let credential = CREDENTIALW {
+        Flags: 0,
+        Type: CRED_TYPE_GENERIC,
+        TargetName: target.as_mut_ptr(),
+        Comment: std::ptr::null_mut(),
+        LastWritten: FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        },
+        CredentialBlobSize: blob.len() as u32,
+        CredentialBlob: blob.as_ptr().cast_mut(),
+        Persist: CRED_PERSIST_LOCAL_MACHINE,
+        AttributeCount: 0,
+        Attributes: std::ptr::null_mut(),
+        TargetAlias: std::ptr::null_mut(),
+        UserName: account.as_mut_ptr(),
+    };
+    if unsafe { CredWriteW(&credential, 0) } == 0 {
+        return Err(format!(
+            "Windows Credential Manager did not save the Gemini API key: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
 }
 
 /// `cursor-agent status` prints "Not logged in" signed out and account details
@@ -340,6 +427,7 @@ fn cursor_auth_status(kind: AgentKind) -> (Option<bool>, Option<String>) {
     let Ok(output) = Command::new(bin)
         .arg("status")
         .env("PATH", crate::env::user_path())
+        .no_window()
         .output() else {
         return (None, None);
     };
@@ -364,9 +452,7 @@ impl Logins {
 
     pub fn shutdown(&self) {
         for pgid in self.0.lock().unwrap().drain(..) {
-            unsafe {
-                libc::killpg(pgid, libc::SIGTERM);
-            }
+            crate::platform::killpg(pgid, crate::platform::SIGTERM);
         }
     }
 }
@@ -406,7 +492,7 @@ pub async fn agent_login(
     // same CLI on PATH itself, which is why this only ever broke the shipped
     // app.)
     let codex_cli = match kind {
-        AgentKind::Codex => launcher.paths().map(crate::env::Paths::codex_cli),
+        AgentKind::Codex => launcher.paths().map(crate::env::Paths::codex_exe),
         _ => None,
     };
     match kind {
@@ -418,7 +504,7 @@ pub async fn agent_login(
     }
     let (pgid_tx, pgid_rx) = std::sync::mpsc::channel::<i32>();
     let done = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        use std::os::unix::process::CommandExt;
+        use crate::platform::OwnGroup;
         let mut command = Command::new(program);
         if let Some(path) = adapter_path {
             command.env("PATH", path);
@@ -431,7 +517,7 @@ pub async fn agent_login(
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .process_group(0)
+            .own_group()
             .spawn()
             .map_err(|e| format!("could not start the sign-in: {e}"))?;
         let pgid = child.id() as i32;
@@ -455,9 +541,7 @@ pub async fn agent_login(
         Ok(joined) => joined.map_err(|e| e.to_string())?,
         Err(_) => {
             if let Ok(pgid) = pgid_rx.try_recv() {
-                unsafe {
-                    libc::killpg(pgid, libc::SIGTERM);
-                }
+                crate::platform::killpg(pgid, crate::platform::SIGTERM);
             }
             Err("The sign-in timed out. Try again.".into())
         }
@@ -468,6 +552,7 @@ pub async fn agent_login(
 mod tests {
     use super::AgentKind;
 
+    #[cfg(not(windows))]
     #[test]
     fn keychain_input_quotes_the_key_as_one_interactive_argument() {
         assert_eq!(
@@ -521,14 +606,15 @@ mod tests {
         let home = std::env::temp_dir().join(format!("nurb-cursor-bin-{}", std::process::id()));
         let bin = home.join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("agent"), b"").unwrap();
+        let exe = crate::platform::exe;
+        std::fs::write(bin.join(exe("agent")), b"").unwrap();
         let (name, _) = AgentKind::Cursor.native_command().unwrap();
         assert_eq!(super::find_bin(name, &home, &[".local/bin"], None), None);
 
-        std::fs::write(bin.join("cursor-agent"), b"").unwrap();
+        std::fs::write(bin.join(exe("cursor-agent")), b"").unwrap();
         assert_eq!(
             super::find_bin(name, &home, &[".local/bin"], None),
-            Some(bin.join("cursor-agent"))
+            Some(bin.join(exe("cursor-agent")))
         );
         std::fs::remove_dir_all(home).unwrap();
     }
@@ -541,11 +627,12 @@ mod tests {
         let (home, brew) = (root.join("home"), root.join("homebrew/bin"));
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&brew).unwrap();
-        std::fs::write(brew.join("claude"), b"").unwrap();
-        let path = format!("/usr/bin:{}", brew.display());
+        let claude = crate::platform::exe("claude");
+        std::fs::write(brew.join(&claude), b"").unwrap();
+        let path = std::env::join_paths([std::path::PathBuf::from("/usr/bin"), brew.clone()]).unwrap();
         assert_eq!(
-            super::find_bin("claude", &home, &[".local/bin", ".claude/local"], Some(path.into())),
-            Some(brew.join("claude"))
+            super::find_bin("claude", &home, &[".local/bin", ".claude/local"], Some(path)),
+            Some(brew.join(&claude))
         );
         std::fs::remove_dir_all(root).unwrap();
     }

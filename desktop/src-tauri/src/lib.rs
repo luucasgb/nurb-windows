@@ -4,6 +4,7 @@ mod claude;
 mod crash;
 mod env;
 mod naming;
+mod platform;
 mod prefs;
 mod provision;
 mod sessions;
@@ -337,6 +338,14 @@ fn install_menu(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// On Windows nurb.exe is also the agent sandbox's launcher (the part
+/// sandbox-exec plays on macOS): Some(exit code) when this process was started
+/// as that, before any of the app loads.
+#[cfg(windows)]
+pub fn sandbox_exec() -> Option<i32> {
+    acp::sandbox::exec_from_args()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -369,6 +378,12 @@ pub fn run() {
             std::thread::spawn(|| {
                 env::user_path();
             });
+            // Windows splits app data into Roaming and Local; a ~1 GB Python
+            // and Node environment belongs in Local, never in a profile that
+            // syncs between machines. On macOS both are Application Support.
+            #[cfg(windows)]
+            let dir = app.path().app_local_data_dir()?;
+            #[cfg(not(windows))]
             let dir = app.path().app_data_dir()?;
             // Debug-only override so tests can point the whole app (sessions,
             // projects, provisioned env, the serve's home) at a scratch

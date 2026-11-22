@@ -57,6 +57,7 @@ import {
 import { AttachmentDraft, restoreDraftText, stashDraft, unstashDraft } from "./chatDraft";
 import { chatKey } from "./chatColumns";
 import { titleCase } from "./parts";
+import { computer } from "./platform";
 
 // The whole-project conversation rides the per-part plumbing under a name no part
 // file can have. Twins live in App.tsx's mount and acp.rs's context line.
@@ -99,7 +100,8 @@ const SECTION_LABEL: Record<string, string> = {
   fast: "Fast mode",
 };
 
-const basename = (path: string) => path.split("/").pop() ?? path;
+// Paths come from the OS, so Windows ones use backslashes.
+const basename = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 // The button's own label: the selected names, not the model ids, since those
 // are the agent's wire values and mean nothing to someone printing a bracket.
@@ -399,7 +401,7 @@ function Chat({
   // the project rather than replaying one of its own.
   const isClaude = agent === "claude";
   // The folder's last segment is the project's id in the store.
-  const projectId = path.split("/").filter(Boolean).pop() ?? "";
+  const projectId = path.split(/[\\/]/).filter(Boolean).pop() ?? "";
   const [items, setItems] = useState<Item[]>([]);
   const [busy, setBusy] = useState(false);
   // A resumed transcript starts loading after the first paint, so treat it as
@@ -1592,7 +1594,7 @@ function Chat({
         )}
         {authNeeded !== "none" && (
           <div className="flex flex-col items-start gap-2 rounded-[6px] bg-raised p-3">
-            <p className="text-chat text-muted">{label} isn't signed in on this Mac.</p>
+            <p className="text-chat text-muted">{label} isn't signed in on this {computer}.</p>
             <Button variant="accent" disabled={signingIn} onClick={signIn}>
               {signingIn ? "signing in…" : "sign in"}
             </Button>
