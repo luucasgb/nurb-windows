@@ -37,6 +37,11 @@ FLATPAKS = {
     "OrcaSlicer": "com.orcaslicer.OrcaSlicer",
     "BambuStudio": "com.bambulab.BambuStudio",
 }
+# Where each one's Windows installer puts it, under Program Files.
+WINDOWS = {
+    "OrcaSlicer": pathlib.Path("OrcaSlicer", "orca-slicer.exe"),
+    "BambuStudio": pathlib.Path("Bambu Studio", "bambu-studio.exe"),
+}
 
 # What each shipped profile is called in a slicer's own vendor bundle. It lives beside
 # the machine rather than in this module's head, so `printers.toml` stays the one place
@@ -115,11 +120,15 @@ def _installed(name):
     """One slicer's executable: macOS keeps it in a bundle. Linux uses a command, an
     AppImage on PATH, or one of the two official Flatpaks. A Flatpak is returned as its
     command prefix; `run` appends the slicing arguments in exactly the same way it does
-    for an executable.
+    for an executable. Windows installs into Program Files, which is not on PATH.
     """
     bundle = pathlib.Path(f"/Applications/{name}.app/Contents/MacOS/{name}")
     if bundle.is_file():
         return bundle
+    if os.name == "nt" and name in WINDOWS:
+        exe = pathlib.Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / WINDOWS[name]
+        if exe.is_file():
+            return exe
     for command in COMMANDS.get(name, (name, name.lower())):
         found = shutil.which(command)
         if found:
@@ -362,10 +371,14 @@ def _user_profile_roots(flavor):
     home = pathlib.Path.home()
     config = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
     app_id = FLATPAKS[flavor]
-    return [
+    roots = [
         config / flavor / "system",
         home / ".var" / "app" / app_id / "config" / flavor / "system",
     ]
+    if os.name == "nt" and os.environ.get("APPDATA"):
+        # The Windows app keeps the same cache in its roaming profile.
+        roots.append(pathlib.Path(os.environ["APPDATA"]) / flavor / "system")
+    return roots
 
 
 def _readable(path):

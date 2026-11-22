@@ -114,7 +114,7 @@ def test_a_part_that_raises_is_a_result_not_a_tool_failure(conn):
     assert body["passed"] is False
     first = body["error"].splitlines()[:2]
     assert first[0] == "Traceback (most recent call last):"
-    assert 'parts/broken.py"' in first[1]
+    assert f'{pathlib.Path("parts", "broken.py")}"' in first[1]
 
 
 def test_the_first_write_names_the_part_the_person_started(conn):

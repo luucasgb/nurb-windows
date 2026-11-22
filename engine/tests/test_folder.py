@@ -4,8 +4,10 @@ The round trip is the whole claim of the v2 store: nothing about a v1 project is
 by keeping it in rows, so the engine can keep reading files it has always read.
 """
 
+import os
 import pathlib
 import stat
+import sys
 import tomllib
 
 import pytest
@@ -77,6 +79,10 @@ def test_parts_module_round_trips_and_builds_from_materialized_location(conn, tm
     ).fetchall()
     assert {row["kind"] for row in rows} == {"module", db.PARTS_MODULE_KIND}
 
+    # Sources are stored as text, and text is written with this platform's line ends.
+    root_module_source, parts_module_source, part_source = (
+        source.replace(b"\n", os.linesep.encode()) for source in (root_module_source, parts_module_source, part_source)
+    )
     scratch = materialize.materialize(conn, project_id, into=tmp_path / "scratch")
     assert (scratch / "_shared.py").read_bytes() == root_module_source
     assert (scratch / "parts" / "_shared.py").read_bytes() == parts_module_source
@@ -261,7 +267,7 @@ def test_root_python_file_with_non_identifier_name_round_trips_as_project_file(c
     (project / "parts").mkdir(parents=True)
     (project / "parts" / "shelf.py").write_text("from nurb import *\n")
     script = project / "build-part.py"
-    script.write_text("print('build')\n")
+    script.write_bytes(b"print('build')\n")
 
     project_id, _ = folder.import_folder(conn, project)
 
@@ -334,6 +340,7 @@ def test_keyboard_interrupt_rolls_back_the_whole_import(conn, monkeypatch, tmp_p
         assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] == 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX mode bits for chmod to set")
 def test_default_materialized_scratch_is_private(conn, monkeypatch, tmp_path):
     monkeypatch.delenv("NURB_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -410,6 +417,7 @@ def test_checkout_refuses_an_attachment_name_that_escapes(conn, tmp_path):
     assert not (tmp_path / "escape.png").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX mode bits for chmod to set")
 def test_project_file_executable_mode_survives_checkout_and_materialize(conn, tmp_path):
     root = tmp_path / "proj"
     (root / "parts").mkdir(parents=True)

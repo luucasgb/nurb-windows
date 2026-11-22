@@ -4,6 +4,11 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
+
+import pytest
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the release script is bash run from a Mac")
 
 
 VERSION = "1.0.0-alpha.1"

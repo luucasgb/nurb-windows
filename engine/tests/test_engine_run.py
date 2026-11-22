@@ -103,7 +103,7 @@ def test_a_raising_part_reports_the_users_own_frame(conn, monkeypatch, tmp_path)
     first = row["error"].splitlines()[:2]
     assert first[0] == "Traceback (most recent call last):"
     assert first[1].startswith('  File "')
-    assert 'parts/broken.py"' in first[1]
+    assert f'{pathlib.Path("parts", "broken.py")}"' in first[1]
 
 
 def test_a_raising_part_still_offers_its_sliders(conn, monkeypatch, tmp_path):

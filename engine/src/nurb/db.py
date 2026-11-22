@@ -245,6 +245,13 @@ def home():
     from . import checks
 
     root = checks.global_file().parent
+    if os.name == "nt":
+        # Windows keeps the profile private through the ACL every folder in it
+        # inherits. Python 3.13 turns mode=0o700 into an owner-only ACL instead,
+        # and a home first created from an elevated process is then owned by
+        # Administrators and shut to every normal launch of the same user.
+        root.mkdir(parents=True, exist_ok=True)
+        return root
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.chmod(0o700)
     _harden_existing_state(root)

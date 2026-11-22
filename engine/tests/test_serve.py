@@ -95,10 +95,17 @@ def post_mcp(url, body, token=None):
 def serving(home, port=None, command=SERVE):
     """A serve on `port`, or on whatever it picks for itself when none is asked for."""
     log = home / "test-serve.log"
+    env = {**os.environ, "NURB_HOME": str(home)}
+    if sys.platform == "win32" and command[0] == sys.executable and sys.executable != sys._base_executable:
+        # A Windows venv's python.exe is a launcher that runs the interpreter as its
+        # child, so its pid is not the serve's and killing it does not wait for the
+        # serve. Start the interpreter itself, the way multiprocessing does there.
+        command = [sys._base_executable, *command[1:]]
+        env["__PYVENV_LAUNCHER__"] = sys.executable
     with open(log, "w", encoding="utf-8") as sink:
         proc = subprocess.Popen(
             [*command, *(["--port", str(port)] if port else [])],
-            env={**os.environ, "NURB_HOME": str(home)},
+            env=env,
             stdout=sink,
             stderr=sink,
         )
@@ -144,7 +151,8 @@ def test_a_home_keeps_its_token_and_port_across_serves(home):
     assert (third["port"], third["token"]) == (moved, first["token"])
     saved = json.loads((home / "connect.json").read_text(encoding="utf-8"))
     assert saved == {"token": first["token"], "port": moved}
-    assert stat.S_IMODE((home / "connect.json").stat().st_mode) == 0o600
+    # Windows has no POSIX mode bits for chmod to set.
+    assert sys.platform == "win32" or stat.S_IMODE((home / "connect.json").stat().st_mode) == 0o600
 
 
 def test_checkout_writes_the_project_out_as_a_folder(home, tmp_path):
@@ -407,6 +415,7 @@ def test_a_non_ascii_token_is_refused_not_crashed(home):
         assert refused.value.code == 401
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no SIGTERM: os.kill terminates outright")
 def test_sigterm_removes_the_state_file(home):
     """uvicorn re-raises the signal after its shutdown, which would skip the cleanup
     that keeps a client from waiting on a port nobody listens to."""

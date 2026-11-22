@@ -9,6 +9,7 @@ two numbers from the files a slicer leaves behind.
 import json
 import os
 import pathlib
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -381,13 +382,37 @@ def test_an_unknown_profile_name_lists_the_real_ones(tmp_path):
 
 # --- finding the slicer -------------------------------------------------------
 
+# Windows finds a command on PATH only by an executable's extension.
+EXE = ".exe" if sys.platform == "win32" else ""
+
 
 def test_no_slicer_installed_is_none_not_a_crash():
     assert slicing.app(search=("NoSuchSlicerExistsHere",)) is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Program Files is where Windows installs")
+def test_a_windows_install_and_its_profiles_are_found(tmp_path, monkeypatch):
+    """Neither installer puts its folder on PATH, and the profiles sit beside the exe."""
+    exe = tmp_path / "Bambu Studio" / "bambu-studio.exe"
+    profiles = exe.parent / "resources" / "profiles"
+    profiles.mkdir(parents=True)
+    exe.write_bytes(b"")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    found = slicing.app(search=("BambuStudio",))
+    assert found == exe
+    assert slicing.vendors(found) == profiles
+    # Without the bundle, the copy the app keeps under %APPDATA% once it has run.
+    profiles.rmdir()
+    cached = tmp_path / "roaming" / "BambuStudio" / "system"
+    cached.mkdir(parents=True)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    assert slicing.vendors(found) == cached
+
+
 def test_a_hyphenated_linux_command_and_share_tree_are_found(tmp_path, monkeypatch):
-    exe = tmp_path / "usr" / "bin" / "orca-slicer"
+    exe = tmp_path / "usr" / "bin" / f"orca-slicer{EXE}"
     exe.parent.mkdir(parents=True)
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
@@ -401,7 +426,7 @@ def test_a_hyphenated_linux_command_and_share_tree_are_found(tmp_path, monkeypat
 
 def _fake_slicer(root, name, machines):
     """An unpacked-AppImage layout: the executable beside resources/profiles."""
-    exe = root / name / name
+    exe = root / name / f"{name}{EXE}"
     exe.parent.mkdir(parents=True)
     exe.write_text("#!/bin/sh\n")
     exe.chmod(0o755)
@@ -632,6 +657,7 @@ def test_prusa_parents_apply_left_to_right_and_the_preset_wins(tmp_path):
         slicing.prusa_presets(exe, "Original Prusa XL")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the stand-in PrusaSlicer is a shell script")
 def test_prusa_totals_are_read_past_the_config_dump(tmp_path):
     """PrusaSlicer prints its totals and then several thousand config lines."""
     exe = _fake_prusa(tmp_path, "; some_setting = 1\\n" * 3000)
