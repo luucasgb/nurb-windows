@@ -390,6 +390,30 @@ impl Chats {
             crate::platform::killpg(session.pgid, crate::platform::SIGTERM);
         }
     }
+
+    /// Ends every live chat with one agent, the way a crashed adapter ends one:
+    /// the column hears why and starts a fresh session on its next message.
+    /// For a sign-out or a new key, which a running adapter never notices.
+    pub fn end_agent(&self, kind: AgentKind, why: &str) {
+        let ended: Vec<ChatSession> = {
+            let mut sessions = self.sessions.lock().unwrap();
+            let ids: Vec<String> = sessions
+                .iter()
+                .filter(|(_, chat)| chat.agent == kind)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter().filter_map(|id| sessions.remove(&id)).collect()
+        };
+        for chat in ended {
+            let error = ChatEvent::SessionError {
+                message: why.to_string(),
+            };
+            events::mirror(&error);
+            let _ = chat.channel.send(error);
+            // Dropping the entry drops its close sender, which ends the
+            // connection and takes the adapter's process group with it.
+        }
+    }
 }
 
 #[tauri::command]

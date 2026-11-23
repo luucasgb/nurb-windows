@@ -3,6 +3,7 @@ mod agents;
 mod claude;
 mod crash;
 mod env;
+mod files;
 mod naming;
 mod platform;
 mod prefs;
@@ -21,7 +22,7 @@ use tauri::{AppHandle, Manager, RunEvent, State};
 
 /// The app data directory, after the debug-only override. Commands that own
 /// a directory on disk read it from here rather than resolving it again.
-struct AppData(PathBuf);
+struct AppData(pub(crate) PathBuf);
 
 /// Share links (`nurb://open/<id>`) macOS handed the app, until the page takes them.
 /// A link that launches the app arrives before the page or the engine is up, so it
@@ -472,6 +473,9 @@ pub fn run() {
             app.manage(launcher);
             app.manage(sessions::SessionStore::load(&dir));
             app.manage(prefs::PrefStore::load(&dir));
+            let files = files::Files::load(&dir);
+            files::grant(app.handle(), &files);
+            app.manage(files);
             app.manage(AppData(dir));
             install_menu(app.handle())?;
             let hidden = app
@@ -517,6 +521,14 @@ pub fn run() {
             acp::close_chat,
             agents::agent_statuses,
             agents::agent_login,
+            agents::agent_logout,
+            files::storage_locations,
+            files::app_data_size,
+            files::export_folder,
+            files::choose_export_folder,
+            files::reset_export_folder,
+            files::show_location,
+            files::open_in_slicer,
             naming::name_part,
             provision::provision_status,
             provision::parts_import_ok,

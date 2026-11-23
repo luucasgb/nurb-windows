@@ -1,8 +1,10 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Button,
+  ConfirmDialog,
   FloatingHeader,
   HeaderCell,
   HeaderDivider,
@@ -10,6 +12,8 @@ import {
   Icon,
   LoadingButton,
   Lockup,
+  Menu,
+  type MenuItem,
   PanelStrip,
   Stage,
   AddPrinterDialog,
@@ -32,6 +36,8 @@ import {
   type Workshop,
 } from "@nurb/workbench/api";
 import { connectCommands, maskToken } from "./connect";
+import { folderName } from "./downloads";
+import { formatBytes, type StorageLocations } from "./files";
 import { readCrashReports, setCrashReports } from "./crashReports";
 import { syncWindowTheme } from "./windowTheme";
 import About from "./About";
@@ -42,8 +48,14 @@ type SettingsAgent = {
   id: string;
   label: string;
   loggedIn: boolean | null;
+  // Who it is signed in as and on what plan, when the agent says.
+  account: string | null;
   detail: string | null;
+  canSignOut: boolean;
 };
+
+// The three things Manage can do that need a yes first.
+type AgentConfirm = { id: string; action: "signOut" | "switch" | "removeKey" };
 
 export type SettingsSection = "agents" | "printers" | "connect" | "general" | "about";
 
@@ -79,6 +91,9 @@ type Props = {
   // Which section opens first, so the printer row in the rail lands on Printers.
   initialSection?: SettingsSection;
   onSignIn: (id: string) => Promise<boolean>;
+  onSignOut: (id: string) => Promise<void>;
+  // Signs in as someone else: a new key for Gemini, a sign-out then a sign-in otherwise.
+  onSwitch: (id: string) => Promise<boolean>;
   onMoreAgents: () => void;
   onClose: () => void;
 };
@@ -112,6 +127,8 @@ export default function Settings({
   onCheckUpdates,
   initialSection = "agents",
   onSignIn,
+  onSignOut,
+  onSwitch,
   onMoreAgents,
   onClose,
 }: Props) {
@@ -124,6 +141,13 @@ export default function Settings({
   const [crashReports, setCrashReportsShown] = useState<boolean | null>(null);
   // The rail's error line is on another screen, so a failed sign-in reports here.
   const [signInError, setSignInError] = useState<string | null>(null);
+  // The agent a Manage action is running on, and what its row says meanwhile.
+  const [agentBusy, setAgentBusy] = useState<{ id: string; label: string } | null>(null);
+  const [agentConfirm, setAgentConfirm] = useState<AgentConfirm | null>(null);
+  // General > Files. The app data size comes on its own, because counting it is slow.
+  const [locations, setLocations] = useState<StorageLocations | null>(null);
+  const [appDataBytes, setAppDataBytes] = useState<number | null>(null);
+  const [filesError, setFilesError] = useState<string | null>(null);
   // One key per copyable row, so only the row you pressed says so.
   const [copied, setCopied] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
@@ -163,6 +187,136 @@ export default function Settings({
       setPrinterBusy(false);
     }
   };
+
+  // Read each time General opens, so a size or a folder changed meanwhile is current.
+  useEffect(() => {
+    if (section !== "general") return;
+    let live = true;
+    invoke<StorageLocations>("storage_locations")
+      .then((said) => live && setLocations(said))
+      .catch((e) => live && setFilesError(String(e)));
+    invoke<number>("app_data_size")
+      .then((bytes) => live && setAppDataBytes(bytes))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [section]);
+
+  // The shell shows the folder picker itself, so only a folder the person
+  // picked can ever be given to the page's file writes.
+  const changeExportFolder = async (command: "choose_export_folder" | "reset_export_folder") => {
+    setFilesError(null);
+    try {
+      const exports = await invoke<StorageLocations["exports"] | null>(command);
+      if (exports) setLocations((current) => (current ? { ...current, exports } : current));
+    } catch (e) {
+      setFilesError(String(e));
+    }
+  };
+
+  const showLocation = (which: "library" | "exports" | "appData") => {
+    setFilesError(null);
+    invoke("show_location", { which }).catch((e) => setFilesError(String(e)));
+  };
+
+  const agentName = (id: string) => AGENT_LABEL[id] ?? agents.find((agent) => agent.id === id)?.label ?? id;
+
+  const runAgentAction = async (id: string, label: string, run: () => Promise<unknown>) => {
+    setSignInError(null);
+    setAgentBusy({ id, label });
+    try {
+      if ((await run()) === true) cue("success");
+    } catch (e) {
+      setSignInError(String(e));
+    } finally {
+      setAgentBusy(null);
+    }
+  };
+
+  const confirmAgent = (confirm: AgentConfirm) => {
+    setAgentConfirm(null);
+    if (confirm.action === "switch") {
+      void runAgentAction(confirm.id, "Switching", () => onSwitch(confirm.id));
+    } else {
+      const label = confirm.action === "removeKey" ? "Removing key" : "Signing out";
+      void runAgentAction(confirm.id, label, () => onSignOut(confirm.id));
+    }
+  };
+
+  // Gemini's key is the app's own; every other agent has an account with its maker.
+  const manageItems = (agent: SettingsAgent): MenuItem[] =>
+    agent.id === "gemini"
+      ? [
+          {
+            label: "Replace key",
+            onSelect: () => void runAgentAction(agent.id, "Replacing key", () => onSwitch(agent.id)),
+          },
+          {
+            label: "Remove key…",
+            tone: "danger",
+            separated: true,
+            onSelect: () => setAgentConfirm({ id: agent.id, action: "removeKey" }),
+          },
+        ]
+      : [
+          { label: "Switch account…", onSelect: () => setAgentConfirm({ id: agent.id, action: "switch" }) },
+          {
+            label: "Sign out…",
+            tone: "danger",
+            separated: true,
+            onSelect: () => setAgentConfirm({ id: agent.id, action: "signOut" }),
+          },
+        ];
+
+  const confirmCopy = (confirm: AgentConfirm) => {
+    const name = agentName(confirm.id);
+    switch (confirm.action) {
+      case "signOut":
+        return {
+          title: `Sign out of ${name}?`,
+          body: `${name} shares this sign-in with your terminal, so it signs out there too. Open ${name} chats stop until you sign back in.`,
+          label: "Sign out",
+        };
+      case "switch":
+        return {
+          title: `Switch ${name} account?`,
+          body: `nurb signs ${name} out, here and in your terminal, then opens your browser. Sign in there with the account you want; if you close it first, ${name} stays signed out.`,
+          label: "Switch account",
+        };
+      case "removeKey":
+        return {
+          title: "Remove the Gemini key?",
+          body: "Gemini stops working in nurb until you add a key again. The key itself keeps working in Google AI Studio.",
+          label: "Remove key",
+        };
+    }
+  };
+
+  // One Files row: what it is, where it is, and what can be done with it.
+  const fileRow = (
+    name: string,
+    note: ReactNode,
+    path: string | undefined,
+    actions: ReactNode,
+    last = false,
+  ) => (
+    <div className={`flex items-start justify-between gap-6 ${last ? "" : "border-b border-line-soft pb-2.5"}`}>
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="font-mono text-[11px] text-ink">{name}</span>
+        <span className="text-[13.5px] leading-[18px] text-muted">{note}</span>
+        <span className="truncate font-mono text-[11px] leading-4 text-ink-soft" title={path}>
+          {path ?? "…"}
+        </span>
+      </div>
+      <div className="flex shrink-0 items-center gap-2 pt-0.5">{actions}</div>
+    </div>
+  );
+
+  const showIn = isWindows ? "Show in Explorer" : "Show in Finder";
+  // Explorer counts in 1024s and Finder in 1000s; match the one beside it.
+  const size = (bytes: number | null | undefined) =>
+    bytes == null ? "" : ` ${formatBytes(bytes, isWindows ? 1024 : 1000)}.`;
 
   const copy = (key: string, text: string) => {
     writeText(text).then(() => {
@@ -293,50 +447,84 @@ export default function Settings({
                   {agentStatusState === "ready" && (
                     <>
                       <div className="flex flex-col">
-                        {agents.map((agent, index) => (
-                          <div
-                            className={`flex h-10 shrink-0 items-center justify-between ${
-                              index === agents.length - 1 ? "" : "border-b border-line-soft"
-                            }`}
-                            key={agent.id}
-                          >
-                            <span className="font-mono text-[11px] text-ink">
-                              {AGENT_LABEL[agent.id] ?? agent.label}
-                            </span>
-                            {agent.loggedIn === false ? (
-                              <LoadingButton
-                                label={agent.id === "gemini" ? "Add key" : "Sign in"}
-                                pendingLabel="Signing in"
-                                successLabel="Signed in"
-                                errorLabel="Try again"
-                                disabled={signingIn !== null && signingIn !== agent.id}
-                                onAction={async () => {
-                                  setSignInError(null);
-                                  let signed: boolean;
-                                  try {
-                                    signed = await onSignIn(agent.id);
-                                  } catch (e) {
-                                    setSignInError(String(e));
-                                    throw e;
-                                  }
-                                  // The key prompt was closed without a key, so
-                                  // nothing was signed in and the button says so.
-                                  if (!signed) throw new Error("No key");
-                                  cue("success");
-                                }}
-                              />
-                            ) : agent.loggedIn ? (
-                              <span className="btn-label flex items-center gap-1.5 text-pass" title={agent.detail ?? undefined}>
-                                <Icon name="check" />
-                                Signed in
+                        {agents.map((agent, index) => {
+                          const who = agent.loggedIn ? [agent.account, agent.detail].filter(Boolean).join(" · ") : "";
+                          // A sign-in started before Settings was last opened still owns its row.
+                          const busy =
+                            agentBusy?.id === agent.id
+                              ? agentBusy.label
+                              : signingIn === agent.id && agentBusy === null
+                                ? "Signing in"
+                                : null;
+                          return (
+                            <div
+                              className={`flex h-10 shrink-0 items-center gap-3 ${
+                                index === agents.length - 1 ? "" : "border-b border-line-soft"
+                              }`}
+                              key={agent.id}
+                            >
+                              <span className="w-16 shrink-0 font-mono text-[11px] text-ink">
+                                {AGENT_LABEL[agent.id] ?? agent.label}
                               </span>
-                            ) : (
-                              <span className="btn-label text-muted" title={agent.detail ?? undefined}>
-                                Status unknown
+                              <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted" title={who || undefined}>
+                                {who}
                               </span>
-                            )}
-                          </div>
-                        ))}
+                              {busy ? (
+                                <span className="btn-label text-muted" role="status">
+                                  {busy}
+                                </span>
+                              ) : agent.loggedIn === false ? (
+                                <LoadingButton
+                                  label={agent.id === "gemini" ? "Add key" : "Sign in"}
+                                  pendingLabel="Signing in"
+                                  successLabel="Signed in"
+                                  errorLabel="Try again"
+                                  disabled={(signingIn !== null && signingIn !== agent.id) || agentBusy !== null}
+                                  onAction={async () => {
+                                    setSignInError(null);
+                                    let signed: boolean;
+                                    try {
+                                      signed = await onSignIn(agent.id);
+                                    } catch (e) {
+                                      setSignInError(String(e));
+                                      throw e;
+                                    }
+                                    // The key prompt was closed without a key, so
+                                    // nothing was signed in and the button says so.
+                                    if (!signed) throw new Error("No key");
+                                    cue("success");
+                                  }}
+                                />
+                              ) : agent.loggedIn ? (
+                                <div className="flex shrink-0 items-center gap-3">
+                                  <span className="btn-label flex items-center gap-1.5 text-pass">
+                                    <Icon name="check" />
+                                    Signed in
+                                  </span>
+                                  {agent.canSignOut ? (
+                                    <Menu
+                                      label={`Manage ${AGENT_LABEL[agent.id] ?? agent.label}`}
+                                      disabled={agentBusy !== null || signingIn !== null}
+                                      triggerClassName="h-6 rounded-control px-1.5 disabled:opacity-40"
+                                      trigger={() => (
+                                        <span className="btn-label flex items-center gap-1 text-muted transition-colors hover:text-ink">
+                                          Manage
+                                          <Icon name="chevron-down" />
+                                        </span>
+                                      )}
+                                      menuClassName="w-[180px]"
+                                      items={manageItems(agent)}
+                                    />
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <span className="btn-label text-muted" title={agent.detail ?? undefined}>
+                                  Status unknown
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                       <button
                         type="button"
@@ -557,6 +745,60 @@ export default function Settings({
                       </div>
                     ) : null}
                   </div>
+
+                  <div className="mt-2">
+                    <SectionHead
+                      title="Files"
+                      note="Where nurb keeps what you make. Your parts live in the library, not as separate files."
+                    />
+                  </div>
+                  <div className="flex flex-col gap-2.5 border-y border-line-soft py-2.5">
+                    {fileRow(
+                      "Library",
+                      `Your projects, parts and measurements.${size(locations?.library.bytes)}`,
+                      locations?.library.path,
+                      <Button onClick={() => showLocation("library")} disabled={!locations}>
+                        {showIn}
+                      </Button>
+                    )}
+                    {fileRow(
+                      "Exports",
+                      locations?.exports.missing ? (
+                        <span className="text-warn" title={locations.exports.missing}>
+                          {folderName(locations.exports.missing)} is not there, so files are saved to Downloads
+                          until it is back.
+                        </span>
+                      ) : (
+                        "Where downloaded parts and files for the slicer are saved."
+                      ),
+                      locations?.exports.path,
+                      <>
+                        {locations?.exports.custom || locations?.exports.missing ? (
+                          <Button onClick={() => void changeExportFolder("reset_export_folder")}>Use Downloads</Button>
+                        ) : null}
+                        <Button onClick={() => void changeExportFolder("choose_export_folder")} disabled={!locations}>
+                          Change…
+                        </Button>
+                        <Button onClick={() => showLocation("exports")} disabled={!locations}>
+                          {showIn}
+                        </Button>
+                      </>
+                    )}
+                    {fileRow(
+                      "App data",
+                      `The engine, the agents and your chats.${size(appDataBytes)}`,
+                      locations?.appData.path,
+                      <Button onClick={() => showLocation("appData")} disabled={!locations}>
+                        {showIn}
+                      </Button>,
+                      true
+                    )}
+                  </div>
+                  {filesError ? (
+                    <p className="mono-label text-fail" role="alert">
+                      {filesError}
+                    </p>
+                  ) : null}
                 </section>
               ) : null}
 
@@ -618,6 +860,16 @@ export default function Settings({
           </div>
         </div>
       </div>
+      {agentConfirm ? (
+        <ConfirmDialog
+          title={confirmCopy(agentConfirm).title}
+          confirmLabel={confirmCopy(agentConfirm).label}
+          onConfirm={() => confirmAgent(agentConfirm)}
+          onCancel={() => setAgentConfirm(null)}
+        >
+          {confirmCopy(agentConfirm).body}
+        </ConfirmDialog>
+      ) : null}
       {addingPrinter && workshop ? (
         <AddPrinterDialog
           catalogue={workshop.catalogue}

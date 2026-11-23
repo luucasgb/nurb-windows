@@ -41,7 +41,6 @@ import { joinSpots, splitSpots, spotPlace } from "@nurb/workbench/spot";
 import {
   activity,
   applyChatEvent,
-  CLAUDE_SIGN_IN,
   claudeNote,
   clearUntilSend,
   describe,
@@ -719,6 +718,11 @@ function Chat({
           // The driver's session lives on disk, so the next start resumes it.
           if (isClaude && sessionRef.current) resumeRef.current = sessionRef.current;
           sessionRef.current = null;
+          // Claude's sign-in has the same button as every other agent's now.
+          if (isClaude && event.message.includes("auth_required")) {
+            setAuthNeeded((state) => (state === "none" ? "resend" : state));
+            return;
+          }
           const trouble = isClaude ? claudeNote(event.message) : null;
           if (trouble) {
             setItems((list) => withNote(list, trouble, { untilSend: true }));
@@ -1560,13 +1564,11 @@ function Chat({
         {!said && !starting && authNeeded === "none" && signedOut && (
           <div className="flex flex-col items-start gap-2 rounded-[6px] bg-raised p-3">
             <p className="text-chat text-muted">
-              {isClaude ? CLAUDE_SIGN_IN : `Sign in to ${label} to start.`}
+              Sign in to {label} to start.
             </p>
-            {!isClaude && (
-              <Button variant="accent" disabled={signingIn} onClick={signIn}>
-                {signingIn ? "signing in…" : "sign in"}
-              </Button>
-            )}
+            <Button variant="accent" disabled={signingIn} onClick={signIn}>
+              {signingIn ? "signing in…" : "sign in"}
+            </Button>
           </div>
         )}
         {flow.map((entry, at) => (

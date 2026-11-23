@@ -16,6 +16,9 @@ type Props = {
   missing: MissingAgent[];
   // Present when the app is waiting on a Gemini key; the key section is shown then.
   onSubmitGeminiKey?: (key: string) => void;
+  // The key a new one would replace ("Key ending a1B2"), when Gemini already has one.
+  // The dialog is then only the key prompt.
+  replacingGeminiKey?: string | null;
   onClose: () => void;
 };
 
@@ -42,9 +45,11 @@ function AgentRow({
 
 /// One door for every way of adding an agent: the ones missing from this Mac,
 /// with their vendor's install line, and the key Gemini needs before it runs.
-export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props) {
+export default function AddAgent({ missing, onSubmitGeminiKey, replacingGeminiKey, onClose }: Props) {
   const [shown, setShown] = useState<string | null>(null);
   const [key, setKey] = useState("");
+  const replacing = Boolean(onSubmitGeminiKey && replacingGeminiKey);
+  const title = replacing ? "Replace the Gemini key" : "Add an agent";
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -69,20 +74,22 @@ export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props)
         className="panel flex max-h-full w-[520px] flex-col overflow-hidden"
         role="dialog"
         aria-modal="true"
-        aria-label="Add an agent"
+        aria-label={title}
         onSubmit={submit}
       >
         <PanelStrip
-          label="Add an agent"
+          label={title}
           inset={16}
           trailing={<IconButton icon="xmark" label="Close" onClick={onClose} className="-mr-2" />}
         />
         <div className="flex flex-col gap-4 overflow-y-auto px-5 pt-5 pb-1">
           <p className="text-[14px] leading-5 text-ink-soft">
-            nurb talks to the coding agent you already use. Pick one.
+            {replacing
+              ? "Paste the key to use instead of the current one."
+              : "nurb talks to the coding agent you already use. Pick one."}
           </p>
 
-          {missing.map((agent) => (
+          {(replacing ? [] : missing).map((agent) => (
             <div className="flex flex-col gap-2.5" key={agent.id}>
               <AgentRow
                 name={AGENT_LABEL[agent.id] ?? agent.label}
@@ -110,12 +117,16 @@ export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props)
 
           {onSubmitGeminiKey ? (
             <div className="flex flex-col gap-2.5">
-              <AgentRow name="Gemini" status="Needs an API key" action={null} />
+              <AgentRow
+                name="Gemini"
+                status={replacing ? `Now using: ${replacingGeminiKey}` : "Needs an API key"}
+                action={null}
+              />
               <div className="flex flex-col gap-2 px-4">
                 <input
                   id="gemini-api-key"
                   aria-label="Gemini API key"
-                  placeholder="Paste your API key"
+                  placeholder={replacing ? "Paste the new API key" : "Paste your API key"}
                   className="h-8 shrink-0 rounded-[3px] border border-line bg-ground px-3 font-mono text-[11px] text-ink placeholder:text-faint focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                   type="password"
                   value={key}
@@ -143,16 +154,18 @@ export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props)
             </p>
           ) : null}
 
-          <p className="text-[13.5px] leading-[18px] text-muted">
-            Using one that isn't here?{" "}
-            <button
-              type="button"
-              className="text-accent-ink underline underline-offset-2 transition-colors hover:text-accent"
-              onClick={() => openUrl("https://github.com/Shpigford/nurb/issues/new?template=feature_request.yml").catch(() => {})}
-            >
-              Ask us for it.
-            </button>
-          </p>
+          {replacing ? null : (
+            <p className="text-[13.5px] leading-[18px] text-muted">
+              Using one that isn't here?{" "}
+              <button
+                type="button"
+                className="text-accent-ink underline underline-offset-2 transition-colors hover:text-accent"
+                onClick={() => openUrl("https://github.com/Shpigford/nurb/issues/new?template=feature_request.yml").catch(() => {})}
+              >
+                Ask us for it.
+              </button>
+            </p>
+          )}
         </div>
         <div className="flex shrink-0 items-center justify-end gap-2 px-5 pt-4 pb-5">
           <Button size="md" className="px-3.5" onClick={onClose}>
@@ -160,7 +173,7 @@ export default function AddAgent({ missing, onSubmitGeminiKey, onClose }: Props)
           </Button>
           {onSubmitGeminiKey ? (
             <Button variant="accent" size="md" className="px-3.5" type="submit" disabled={!key.trim()}>
-              Connect
+              {replacing ? "Replace key" : "Connect"}
             </Button>
           ) : null}
         </div>

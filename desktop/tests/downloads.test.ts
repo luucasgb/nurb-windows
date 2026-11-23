@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { numbered } from "../src/downloads.ts";
+import { folderName, numbered } from "../src/downloads.ts";
+
+test("a saved file names the folder it went to", () => {
+  assert.equal(folderName("C:\\Users\\maker\\Downloads"), "Downloads");
+  assert.equal(folderName("/Users/maker/Prints/"), "Prints");
+  assert.equal(folderName("D:\\"), "D:");
+});
 
 test("a second copy is named the way Finder names one", () => {
   assert.equal(numbered("drill_bits.3mf", 2), "drill_bits 2.3mf");

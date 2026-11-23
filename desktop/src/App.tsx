@@ -42,7 +42,7 @@ import EngineStarting from "./EngineStarting";
 import { createLatestRequestGate } from "./latestRequest";
 import Library from "./Library";
 import ProjectPanel from "./ProjectPanel";
-import { openInSlicer, saveToDownloads } from "./downloads";
+import { openInSlicer, saveExport } from "./downloads";
 import { isDraft, messagesForPart, moveTargets, titleCase } from "./parts";
 import ProjectPicker from "./ProjectPicker";
 import SharedPartDialog from "./SharedPartDialog";
@@ -73,7 +73,9 @@ type AgentStatus = {
   label: string;
   installed: boolean;
   loggedIn: boolean | null;
+  account: string | null;
   detail: string | null;
+  canSignOut: boolean;
   note: string;
   install: string | null;
 };
@@ -183,6 +185,8 @@ function App() {
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const geminiKeyResolver = useRef<((key: string | null) => void) | null>(null);
+  // The key being replaced, so the prompt says which one; null when adding Gemini.
+  const [replacingGeminiKey, setReplacingGeminiKey] = useState<string | null>(null);
 
   // One pod for work the window should mention: an export the part page started,
   // a build that landed on a part nobody is looking at.
@@ -594,11 +598,13 @@ function App() {
 
   const finishGeminiKey = (key: string | null) => {
     setShowGeminiKey(false);
+    setReplacingGeminiKey(null);
     geminiKeyResolver.current?.(key);
     geminiKeyResolver.current = null;
   };
 
-  const signInAgent = async (id: string): Promise<boolean> => {
+  const signInAgent = async (id: string, replacing: string | null = null): Promise<boolean> => {
+    if (id === "gemini") setReplacingGeminiKey(replacing);
     const apiKey = id === "gemini" ? await requestGeminiKey() : null;
     if (id === "gemini" && apiKey === null) return false;
     setSigningIn(id);
@@ -613,6 +619,28 @@ function App() {
     } finally {
       setSigningIn(null);
     }
+  };
+
+  // The sign-in is the agent's own and shared with its terminal install, so
+  // signing out goes through the agent too and leaves both agreeing.
+  const signOutAgent = async (id: string): Promise<void> => {
+    setError(null);
+    try {
+      await invoke("agent_logout", { agent: id });
+    } finally {
+      await refreshAgents().catch(() => {});
+    }
+  };
+
+  // Gemini's key is replaced in place and only once the new one connects; an
+  // agent with an account of its own is signed out, then signed in again.
+  const switchAgent = async (id: string): Promise<boolean> => {
+    if (id === "gemini") {
+      const current = agentStatuses.find((status) => status.id === id)?.account ?? null;
+      return signInAgent(id, current);
+    }
+    await signOutAgent(id);
+    return signInAgent(id);
   };
 
   // A new part is its own container until the person puts it in a project, so
@@ -987,6 +1015,7 @@ function App() {
       <AddAgent
         missing={agentStatuses.filter((status) => !status.installed)}
         onSubmitGeminiKey={showGeminiKey ? finishGeminiKey : undefined}
+        replacingGeminiKey={showGeminiKey ? replacingGeminiKey : null}
         onClose={() => {
           setShowAddAgent(false);
           if (showGeminiKey) finishGeminiKey(null);
@@ -1050,7 +1079,7 @@ function App() {
           onPointAt={(text) => projectId && setComposerSeed({ projectId, part: chatPart, text })}
           onPartRenamed={(was, name) => projectId && partRenamed(projectId, was, name)}
           onManagePrinters={() => setSettingsSection("printers")}
-          onSaveFile={saveToDownloads}
+          onSaveFile={saveExport}
           onOpenInSlicer={openInSlicer}
           onCopyText={writeText}
           onOpenLink={(url) => void openUrl(url).catch(() => {})}
@@ -1220,6 +1249,8 @@ function App() {
             onCheckUpdates={import.meta.env.PROD ? () => void checkUpdatesNow() : undefined}
             initialSection={settingsSection}
             onSignIn={signInAgent}
+            onSignOut={signOutAgent}
+            onSwitch={switchAgent}
             onMoreAgents={() => setShowAddAgent(true)}
             onClose={() => setSettingsSection(null)}
           />

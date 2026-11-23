@@ -290,14 +290,13 @@ export function applyChatEvent(items: Item[], event: ChatEvent, at: number, seq 
 
 const CLAUDE_OUTDATED = /claude_outdated:\s*([^\s"']+)/;
 
-// The login subcommand, not bare claude: a token revoked on claude.ai still
-// reads as signed in locally, so the interactive CLI would not ask (#390).
-export const CLAUDE_SIGN_IN =
-  "Sign in to Claude Code: open a terminal and run claude auth login. Then come back here.";
-
 /**
  * What to say when Claude Code itself is the problem. Each one is something the
- * person fixes in a terminal, so none of them offers a button.
+ * person fixes in a terminal, so none of them offers a button. Signing in is
+ * not one of them: the column's sign-in button runs Claude's own login, the
+ * login subcommand rather than bare claude, because a token revoked on
+ * claude.ai still reads as signed in locally and the interactive CLI would
+ * not ask (#390).
  */
 export function claudeNote(message: string): string | null {
   if (message.includes("claude_missing")) {
@@ -306,9 +305,6 @@ export function claudeNote(message: string): string | null {
   const outdated = message.match(CLAUDE_OUTDATED);
   if (outdated) {
     return `Update Claude Code: in a terminal run claude update (you have ${outdated[1]}, 2.1.221 or newer is needed).`;
-  }
-  if (message.includes("auth_required")) {
-    return CLAUDE_SIGN_IN;
   }
   return null;
 }

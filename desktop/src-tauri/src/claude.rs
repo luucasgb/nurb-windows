@@ -111,6 +111,17 @@ impl Drivers {
             session.signal(crate::platform::SIGTERM);
         }
     }
+
+    /// Ends every running Claude child after a sign-out, which a running child
+    /// never notices. It ends as a stop does: the column says so and resumes
+    /// the conversation, signed in as whoever is signed in by then, on its
+    /// next message.
+    pub(crate) fn end_all(&self) {
+        for session in self.sessions.lock().unwrap().values() {
+            session.stopped.store(true, Ordering::SeqCst);
+            session.signal(crate::platform::SIGTERM);
+        }
+    }
 }
 
 impl Session {
@@ -768,6 +779,9 @@ async fn read_stream(
         .ok()
         .and_then(|status| status.code())
         .unwrap_or(-1);
+    // The id is free for Windows to give another process now, so nothing may
+    // signal it again (a later sign-out or exit would end that process instead).
+    session.pgid.store(0, Ordering::SeqCst);
     // Every exit reaches the column, or a child that died before its first
     // turn leaves the column holding an id that answers nothing.
     let message = if session.stopped.load(Ordering::SeqCst) {

@@ -13,9 +13,10 @@
 #[cfg(not(windows))]
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
-#[cfg(not(windows))]
-use std::process::Stdio;
+use std::process::{Command, Stdio};
+
+use base64::Engine as _;
+use serde_json::Value;
 
 use crate::platform::NoWindow;
 use std::sync::Mutex;
@@ -136,6 +137,12 @@ impl AgentKind {
         }
     }
 
+    /// Whether the app can sign this agent out, and so switch its account.
+    /// Grok's CLI has no sign-out the app has been able to check.
+    pub fn can_sign_out(self) -> bool {
+        !matches!(self, Self::Grok)
+    }
+
     /// The vendor's one-line installer, for the "need another agent?" help.
     /// Only the native CLIs have one; the adapter-hosted pair arrive with the
     /// app and are never absent outside a broken dev machine.
@@ -186,8 +193,11 @@ pub struct AgentStatus {
     installed: bool,
     /// None means the check itself failed, not signed out.
     logged_in: Option<bool>,
-    /// Extra detail worth showing ("max plan"), when the check provides it.
+    /// Who it is signed in as (an email, or which key), when the store says.
+    account: Option<String>,
+    /// Extra detail worth showing ("Max plan"), when the check provides it.
     detail: Option<String>,
+    can_sign_out: bool,
     note: &'static str,
     /// The vendor's installer command, for agents the app finds but the user
     /// installs. The rail hides uninstalled agents; the help modal uses this.
@@ -202,23 +212,32 @@ pub async fn agent_statuses(app: tauri::AppHandle) -> Vec<AgentStatus> {
         let launcher = launcher.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let installed = launcher.adapter_available(agent);
-            let (logged_in, detail) = if installed {
+            let login = if installed {
                 match agent {
                     AgentKind::Claude => driver_auth_status(),
-                    AgentKind::Codex => (Some(auth_file(".codex").is_file()), None),
-                    AgentKind::Gemini => (Some(gemini_api_key().is_ok()), None),
+                    AgentKind::Codex => codex_login(),
+                    AgentKind::Gemini => match gemini_api_key() {
+                        Ok(key) => Login {
+                            signed_in: Some(true),
+                            account: Some(key_hint(&key)),
+                            detail: None,
+                        },
+                        Err(_) => Login::known(false),
+                    },
                     AgentKind::Cursor => cursor_auth_status(agent),
-                    AgentKind::Grok => (Some(auth_file(".grok").is_file()), None),
+                    AgentKind::Grok => Login::known(auth_file(".grok").is_file()),
                 }
             } else {
-                (None, None)
+                Login::unknown()
             };
             AgentStatus {
                 id: agent.id(),
                 label: agent.label(),
                 installed,
-                logged_in,
-                detail,
+                logged_in: login.signed_in,
+                account: login.account,
+                detail: login.detail,
+                can_sign_out: agent.can_sign_out(),
                 note: agent.subscription_note(),
                 install: agent.install_command(),
             }
@@ -231,7 +250,9 @@ pub async fn agent_statuses(app: tauri::AppHandle) -> Vec<AgentStatus> {
             label: agent.label(),
             installed: false,
             logged_in: None,
+            account: None,
             detail: None,
+            can_sign_out: agent.can_sign_out(),
             note: agent.subscription_note(),
             install: agent.install_command(),
         }));
@@ -239,32 +260,154 @@ pub async fn agent_statuses(app: tauri::AppHandle) -> Vec<AgentStatus> {
     statuses
 }
 
+/// What a status check found. `signed_in: None` means the check itself
+/// failed, not signed out.
+struct Login {
+    signed_in: Option<bool>,
+    account: Option<String>,
+    detail: Option<String>,
+}
+
+impl Login {
+    fn known(signed_in: bool) -> Self {
+        Self {
+            signed_in: Some(signed_in),
+            account: None,
+            detail: None,
+        }
+    }
+
+    fn unknown() -> Self {
+        Self {
+            signed_in: None,
+            account: None,
+            detail: None,
+        }
+    }
+}
+
+/// "max" as the row shows it: "Max plan".
+fn plan_label(plan: &str) -> String {
+    let mut chars = plan.chars();
+    match chars.next() {
+        Some(first) => format!("{}{} plan", first.to_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
+}
+
 /// The driver's own check: `claude auth status` exits 0 signed in and
 /// non-zero signed out, and prints JSON with `--json` on the versions that
-/// have it, which also carries the plan.
-fn driver_auth_status() -> (Option<bool>, Option<String>) {
+/// have it, which also carries the account and the plan.
+fn driver_auth_status() -> Login {
     let Some(bin) = AgentKind::Claude.native_bin() else {
-        return (None, None);
+        return Login::unknown();
     };
     let Ok(output) = Command::new(bin)
         .args(["auth", "status", "--json"])
         .env("PATH", crate::env::user_path())
         .no_window()
         .output() else {
+        return Login::unknown();
+    };
+    let parsed = serde_json::from_slice::<Value>(&output.stdout).ok();
+    claude_login(parsed.as_ref(), output.status.success())
+}
+
+fn claude_login(json: Option<&Value>, exited_ok: bool) -> Login {
+    let field = |name: &str| {
+        json.and_then(|json| json.get(name))
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let signed_in = json
+        .and_then(|json| json.get("loggedIn"))
+        .and_then(Value::as_bool)
+        .unwrap_or(exited_ok);
+    if !signed_in {
+        return Login::known(false);
+    }
+    Login {
+        signed_in: Some(true),
+        account: field("email").map(str::to_string),
+        detail: field("subscriptionType").map(plan_label),
+    }
+}
+
+fn codex_login() -> Login {
+    let file = auth_file(".codex");
+    if !file.is_file() {
+        return Login::known(false);
+    }
+    let (account, detail) = std::fs::read_to_string(&file)
+        .map(|text| codex_account(&text))
+        .unwrap_or_default();
+    Login {
+        signed_in: Some(true),
+        account,
+        detail,
+    }
+}
+
+/// Who Codex's auth.json is signed in as, without its secrets: the email and
+/// plan from the ChatGPT sign-in's id token, or that it is an API key.
+fn codex_account(text: &str) -> (Option<String>, Option<String>) {
+    let Ok(json) = serde_json::from_str::<Value>(text) else {
         return (None, None);
     };
-    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
-    let logged_in = parsed
-        .as_ref()
-        .and_then(|json| json.get("loggedIn"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(output.status.success());
-    let detail = parsed
-        .as_ref()
-        .and_then(|json| json.get("subscriptionType"))
-        .and_then(|v| v.as_str())
-        .map(|plan| format!("{plan} plan"));
-    (Some(logged_in), detail.filter(|_| logged_in))
+    if json.get("auth_mode").and_then(Value::as_str) == Some("apikey") {
+        return (Some("API key".into()), None);
+    }
+    let Some(claims) = json
+        .pointer("/tokens/id_token")
+        .and_then(Value::as_str)
+        .and_then(jwt_claims)
+    else {
+        let api_key = json
+            .get("OPENAI_API_KEY")
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.is_empty());
+        return (api_key.then(|| "API key".into()), None);
+    };
+    let email = claims.get("email").and_then(Value::as_str).map(str::to_string);
+    let plan = claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_plan_type"))
+        .and_then(Value::as_str)
+        .filter(|plan| !plan.is_empty())
+        .map(plan_label);
+    (email, plan)
+}
+
+/// A JWT's payload, read and never verified: it only labels a row.
+fn jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Enough of a key to tell two apart, never enough to use: the last four
+/// characters of a real key, nothing of one too short to spare them.
+fn key_hint(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() < 16 {
+        return "API key".into();
+    }
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("Key ending {tail}")
+}
+
+/// The first thing in a CLI's status text that reads as an email address.
+fn email_in(text: &str) -> Option<String> {
+    text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>' | '"' | '\'' | ','))
+        .map(|word| word.trim_end_matches(['.', ':', ';']))
+        .find(|word| {
+            word.split_once('@').is_some_and(|(name, domain)| {
+                !name.is_empty() && domain.contains('.') && !domain.starts_with('.')
+            })
+        })
+        .map(str::to_string)
 }
 
 /// Codex and Grok keep no status subcommand worth trusting, but both write
@@ -285,6 +428,17 @@ fn auth_file(dir: &str) -> PathBuf {
 const GEMINI_KEYCHAIN_SERVICE: &str = "dev.nurb.desktop.gemini-api-key";
 const GEMINI_KEYCHAIN_ACCOUNT: &str = "gemini";
 
+/// The key's name in the Keychain or Credential Manager. A debug run against a
+/// scratch data dir keeps a key of its own, so trying Replace or Remove there
+/// never touches the developer's real one. Never compiled into release builds.
+fn gemini_service() -> String {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("NURB_DESKTOP_DATA").is_some() {
+        return format!("{GEMINI_KEYCHAIN_SERVICE}.scratch");
+    }
+    GEMINI_KEYCHAIN_SERVICE.to_string()
+}
+
 #[cfg(not(windows))]
 pub(crate) fn gemini_api_key() -> Result<String, String> {
     let output = Command::new("/usr/bin/security")
@@ -293,7 +447,7 @@ pub(crate) fn gemini_api_key() -> Result<String, String> {
             "-a",
             GEMINI_KEYCHAIN_ACCOUNT,
             "-s",
-            GEMINI_KEYCHAIN_SERVICE,
+            &gemini_service(),
             "-w",
         ])
         .output()
@@ -315,8 +469,9 @@ pub(crate) fn gemini_api_key() -> Result<String, String> {
 #[cfg(not(windows))]
 fn save_gemini_api_key(key: &str) -> Result<(), String> {
     let key = security_interactive_argument(key)?;
+    let service = gemini_service();
     let command = format!(
-        "add-generic-password -a \"{GEMINI_KEYCHAIN_ACCOUNT}\" -s \"{GEMINI_KEYCHAIN_SERVICE}\" -w {key} -U\n"
+        "add-generic-password -a \"{GEMINI_KEYCHAIN_ACCOUNT}\" -s \"{service}\" -w {key} -U\n"
     );
     let mut child = Command::new("/usr/bin/security")
         .arg("-i")
@@ -339,6 +494,28 @@ fn save_gemini_api_key(key: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
+fn delete_gemini_api_key() -> Result<(), String> {
+    let status = Command::new("/usr/bin/security")
+        .args([
+            "delete-generic-password",
+            "-a",
+            GEMINI_KEYCHAIN_ACCOUNT,
+            "-s",
+            &gemini_service(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("could not remove the Gemini API key: {error}"))?;
+    // 44 is errSecItemNotFound: already gone, which is what was asked.
+    if status.success() || status.code() == Some(44) {
+        Ok(())
+    } else {
+        Err("macOS Keychain did not remove the Gemini API key".into())
+    }
+}
+
+#[cfg(not(windows))]
 fn security_interactive_argument(value: &str) -> Result<String, String> {
     if value.contains(['\r', '\n']) {
         return Err("Gemini API key contains an invalid line break".into());
@@ -355,7 +532,7 @@ fn security_interactive_argument(value: &str) -> Result<String, String> {
 pub(crate) fn gemini_api_key() -> Result<String, String> {
     use crate::platform::windows::wide;
     use windows_sys::Win32::Security::Credentials::{CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC};
-    let target = wide(std::ffi::OsStr::new(GEMINI_KEYCHAIN_SERVICE));
+    let target = wide(std::ffi::OsStr::new(&gemini_service()));
     let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
     if unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential) } == 0 {
         return Err("Gemini API key not found".into());
@@ -388,7 +565,7 @@ fn save_gemini_api_key(key: &str) -> Result<(), String> {
     use windows_sys::Win32::Security::Credentials::{
         CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
-    let mut target = wide(std::ffi::OsStr::new(GEMINI_KEYCHAIN_SERVICE));
+    let mut target = wide(std::ffi::OsStr::new(&gemini_service()));
     let mut account = wide(std::ffi::OsStr::new(GEMINI_KEYCHAIN_ACCOUNT));
     let blob = key.as_bytes();
     let credential = CREDENTIALW {
@@ -417,27 +594,49 @@ fn save_gemini_api_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn delete_gemini_api_key() -> Result<(), String> {
+    use crate::platform::windows::wide;
+    use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+    use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
+    let target = wide(std::ffi::OsStr::new(&gemini_service()));
+    if unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) } == 0 {
+        let error = std::io::Error::last_os_error();
+        // Already gone, which is what was asked.
+        if error.raw_os_error() != Some(ERROR_NOT_FOUND as i32) {
+            return Err(format!(
+                "Windows Credential Manager did not remove the Gemini API key: {error}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `cursor-agent status` prints "Not logged in" signed out and account details
 /// signed in, with no JSON form, so the text is the signal and anything
 /// unrecognizable is honestly unknown rather than guessed.
-fn cursor_auth_status(kind: AgentKind) -> (Option<bool>, Option<String>) {
+fn cursor_auth_status(kind: AgentKind) -> Login {
     let Some(bin) = kind.native_bin() else {
-        return (None, None);
+        return Login::unknown();
     };
     let Ok(output) = Command::new(bin)
         .arg("status")
         .env("PATH", crate::env::user_path())
         .no_window()
         .output() else {
-        return (None, None);
+        return Login::unknown();
     };
     let text = String::from_utf8_lossy(&output.stdout);
     if text.contains("Not logged in") {
-        (Some(false), None)
+        Login::known(false)
     } else if output.status.success() && !text.trim().is_empty() {
-        (Some(true), None)
+        Login {
+            signed_in: Some(true),
+            account: email_in(&text),
+            detail: None,
+        }
     } else {
-        (None, None)
+        Login::unknown()
     }
 }
 
@@ -469,17 +668,18 @@ pub async fn agent_login(
 ) -> Result<(), String> {
     use tauri::Manager;
     let kind = AgentKind::parse(&agent)?;
-    // The driver never touches credentials: the CLI owns its own sign-in, and
-    // it is already installed on this Mac.
-    if kind == AgentKind::Claude {
-        return Err("Sign in from a terminal: run claude auth login, then come back.".into());
-    }
     if kind == AgentKind::Gemini {
         let key = api_key
             .filter(|key| !key.trim().is_empty())
             .ok_or("Enter a Gemini API key from Google AI Studio.")?;
-        crate::acp::authenticate(app, kind, "gemini-api-key", Some(&key)).await?;
-        return save_gemini_api_key(&key);
+        let replacing = gemini_api_key().is_ok();
+        crate::acp::authenticate(app.clone(), kind, "gemini-api-key", Some(&key)).await?;
+        save_gemini_api_key(&key)?;
+        // A running Gemini was handed the old key when it started.
+        if replacing {
+            end_chats(&app, kind, "Gemini has a new key, so this chat ended. Send a message to start a fresh one.");
+        }
+        return Ok(());
     }
     let launcher = app.state::<crate::env::Launcher>();
     let (program, mut args) = launcher.adapter(kind);
@@ -497,10 +697,14 @@ pub async fn agent_login(
     };
     match kind {
         AgentKind::Codex => args.push("login".into()),
+        // The driver still never touches credentials: this is Claude's own
+        // sign-in, which opens the browser itself and waits for it without a
+        // terminal, writing the same store the user's terminal reads.
+        AgentKind::Claude => args = vec!["auth".into(), "login".into()],
         // Native CLIs: drop the ACP args the launcher put on, login is its
         // own subcommand.
         AgentKind::Cursor | AgentKind::Grok => args = vec!["login".into()],
-        AgentKind::Gemini | AgentKind::Claude => unreachable!(),
+        AgentKind::Gemini => unreachable!(),
     }
     let (pgid_tx, pgid_rx) = std::sync::mpsc::channel::<i32>();
     let done = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
@@ -548,9 +752,179 @@ pub async fn agent_login(
     }
 }
 
+/// Signs an agent out through its own CLI, so its store and any terminal
+/// install agree: the sign-in is shared, and so is the sign-out. Gemini's key
+/// is the app's own, so it is removed here.
+#[tauri::command]
+pub async fn agent_logout(app: tauri::AppHandle, agent: String) -> Result<(), String> {
+    use tauri::Manager;
+    let kind = AgentKind::parse(&agent)?;
+    if kind == AgentKind::Gemini {
+        delete_gemini_api_key()?;
+    } else {
+        let launcher = app.state::<crate::env::Launcher>().inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let output = logout_command(&launcher, kind)?
+                .stdin(Stdio::null())
+                .no_window()
+                .output()
+                .map_err(|e| format!("could not start the sign-out: {e}"))?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(format!("{} did not sign out. Try again.", kind.label()))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    }
+    end_chats(
+        &app,
+        kind,
+        &format!("{} was signed out, so this chat ended. Send a message to start a fresh one.", kind.label()),
+    );
+    Ok(())
+}
+
+/// Ends the agent's open chats, which keep the sign-in or key they started
+/// with until their process does.
+fn end_chats(app: &tauri::AppHandle, kind: AgentKind, why: &str) {
+    use tauri::Manager;
+    if kind == AgentKind::Claude {
+        app.state::<crate::claude::Drivers>().end_all();
+    } else {
+        app.state::<crate::acp::Chats>().end_agent(kind, why);
+    }
+}
+
+fn logout_command(launcher: &crate::env::Launcher, kind: AgentKind) -> Result<Command, String> {
+    match kind {
+        AgentKind::Claude | AgentKind::Cursor => {
+            let bin = kind
+                .native_bin()
+                .ok_or_else(|| format!("{} is not on this computer.", kind.label()))?;
+            let mut command = Command::new(bin);
+            if kind == AgentKind::Claude {
+                command.args(["auth", "logout"]);
+            } else {
+                command.arg("logout");
+            }
+            command.env("PATH", crate::env::user_path());
+            Ok(command)
+        }
+        AgentKind::Codex => match launcher.paths() {
+            Some(paths) => {
+                let mut command = Command::new(paths.codex_exe());
+                command.arg("logout");
+                if let Some(path) = launcher.adapter_path() {
+                    command.env("PATH", path);
+                }
+                Ok(command)
+            }
+            // A checkout runs the adapter through npx, which carries the same
+            // CLI the provisioned app bundles.
+            None => {
+                let mut command = Command::new(if cfg!(windows) { "npx.cmd" } else { "npx" });
+                command.args(["-y", "-p", kind.adapter().expect("adapter-hosted"), "codex", "logout"]);
+                Ok(command)
+            }
+        },
+        AgentKind::Grok => Err("Sign Grok out from its own app.".into()),
+        AgentKind::Gemini => unreachable!(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AgentKind;
+    use super::{claude_login, codex_account, email_in, key_hint, plan_label, AgentKind};
+    use base64::Engine as _;
+
+    fn id_token(claims: serde_json::Value) -> String {
+        let encode = |value: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.to_string())
+        };
+        format!("{}.{}.signature", encode(&serde_json::json!({"alg": "RS256"})), encode(&claims))
+    }
+
+    #[test]
+    fn a_chatgpt_sign_in_names_its_email_and_plan() {
+        let auth = serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "auth_mode": "chatgpt",
+            "tokens": {"id_token": id_token(serde_json::json!({
+                "email": "maker@example.com",
+                "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"}
+            }))}
+        });
+        assert_eq!(
+            codex_account(&auth.to_string()),
+            (Some("maker@example.com".into()), Some("Plus plan".into()))
+        );
+    }
+
+    #[test]
+    fn a_codex_api_key_is_named_as_one_and_never_shown() {
+        let auth = serde_json::json!({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-secret"});
+        assert_eq!(codex_account(&auth.to_string()), (Some("API key".into()), None));
+        let older = serde_json::json!({"OPENAI_API_KEY": "sk-secret", "tokens": null});
+        assert_eq!(codex_account(&older.to_string()), (Some("API key".into()), None));
+    }
+
+    #[test]
+    fn an_unreadable_codex_store_still_reads_as_signed_in_without_a_name() {
+        assert_eq!(codex_account("not json"), (None, None));
+        let broken = serde_json::json!({"auth_mode": "chatgpt", "tokens": {"id_token": "a.%%%.c"}});
+        assert_eq!(codex_account(&broken.to_string()), (None, None));
+    }
+
+    #[test]
+    fn claude_status_gives_the_account_and_plan_only_when_signed_in() {
+        let signed_in = serde_json::json!({
+            "loggedIn": true, "email": "maker@example.com", "subscriptionType": "max"
+        });
+        let login = claude_login(Some(&signed_in), true);
+        assert_eq!(login.signed_in, Some(true));
+        assert_eq!(login.account.as_deref(), Some("maker@example.com"));
+        assert_eq!(login.detail.as_deref(), Some("Max plan"));
+
+        let signed_out = serde_json::json!({"loggedIn": false, "email": "maker@example.com"});
+        let login = claude_login(Some(&signed_out), false);
+        assert_eq!(login.signed_in, Some(false));
+        assert_eq!(login.account, None);
+
+        // Versions without --json answer by exit code alone.
+        assert_eq!(claude_login(None, true).signed_in, Some(true));
+    }
+
+    #[test]
+    fn a_key_hint_shows_four_characters_of_a_real_key_and_none_of_a_short_one() {
+        assert_eq!(key_hint("AIzaSyD-0123456789abcdefghijklmnopqrWXYZ"), "Key ending WXYZ");
+        assert_eq!(key_hint("short-key"), "API key");
+    }
+
+    #[test]
+    fn an_email_is_found_in_free_status_text() {
+        assert_eq!(
+            email_in("\u{2713} Logged in as maker@example.com.").as_deref(),
+            Some("maker@example.com")
+        );
+        assert_eq!(email_in("Account: <maker@example.co.uk>").as_deref(), Some("maker@example.co.uk"));
+        assert_eq!(email_in("Logged in"), None);
+        assert_eq!(email_in("user@localhost"), None);
+    }
+
+    #[test]
+    fn a_plan_reads_as_a_capitalised_plan() {
+        assert_eq!(plan_label("team"), "Team plan");
+        assert_eq!(plan_label(""), "");
+    }
+
+    #[test]
+    fn only_grok_cannot_be_signed_out_from_the_app() {
+        for kind in super::ALL {
+            assert_eq!(kind.can_sign_out(), kind != AgentKind::Grok, "{kind:?}");
+        }
+    }
 
     #[cfg(not(windows))]
     #[test]
