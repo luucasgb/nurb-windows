@@ -11782,7 +11782,7 @@ function i2({
     {
       role: "img",
       "aria-label": "nurb",
-      className: `${e === "panel" ? "h-6 w-[87px]" : "h-[18px] w-[65px]"} shrink-0 text-ink`,
+      className: `${e === "about" ? "h-9 w-[130px]" : e === "panel" ? "h-6 w-[87px]" : "h-[18px] w-[65px]"} shrink-0 text-ink`,
       dangerouslySetInnerHTML: { __html: Ob }
     }
   );
