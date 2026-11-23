@@ -739,7 +739,8 @@ server.serve_forever()
             ),
         )
         .unwrap();
-        let line = "python3 serve.py >/dev/null 2>&1 </dev/null";
+        // Its output is kept beside it, so a stand-in that never listens says why.
+        let line = "python3 serve.py >serve.log 2>&1 </dev/null";
         if orphan {
             let status = Command::new("sh")
                 .args(["-c", &format!("{line} &")])
@@ -762,7 +763,11 @@ server.serve_forever()
             if let Ok(text) = std::fs::read_to_string(dir.join("port")) {
                 break text.parse().unwrap();
             }
-            assert!(Instant::now() < deadline, "the fake serve never listened");
+            assert!(
+                Instant::now() < deadline,
+                "the fake serve never listened (orphan: {orphan}); it said: {:?}",
+                std::fs::read_to_string(dir.join("serve.log")).unwrap_or_default()
+            );
             thread::sleep(Duration::from_millis(25));
         };
         let pid = health_pid(port, HEALTH_TIMEOUT).unwrap();
