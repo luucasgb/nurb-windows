@@ -22,7 +22,7 @@ function failure(e: unknown): Error {
   return e instanceof Error ? e : new Error(String(e));
 }
 
-// An export lands in the folder chosen under Settings > General (Downloads
+// An export lands in the folder chosen under Settings > Files (Downloads
 // until then), never over an earlier one.
 async function writeExport(name: string, blob: Blob): Promise<{ path: string; folder: string }> {
   try {

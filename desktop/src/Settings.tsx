@@ -57,13 +57,14 @@ type SettingsAgent = {
 // The three things Manage can do that need a yes first.
 type AgentConfirm = { id: string; action: "signOut" | "switch" | "removeKey" };
 
-export type SettingsSection = "agents" | "printers" | "connect" | "general" | "about";
+export type SettingsSection = "agents" | "printers" | "connect" | "files" | "general" | "about";
 
 // The nav at the left, in the order a new user meets them.
 const SECTIONS: { id: SettingsSection; label: string }[] = [
   { id: "agents", label: "Agents" },
   { id: "printers", label: "Printers" },
   { id: "connect", label: "Connect" },
+  { id: "files", label: "Files" },
   { id: "general", label: "General" },
   { id: "about", label: "About" },
 ];
@@ -144,7 +145,7 @@ export default function Settings({
   // The agent a Manage action is running on, and what its row says meanwhile.
   const [agentBusy, setAgentBusy] = useState<{ id: string; label: string } | null>(null);
   const [agentConfirm, setAgentConfirm] = useState<AgentConfirm | null>(null);
-  // General > Files. The app data size comes on its own, because counting it is slow.
+  // The Files section. The app data size comes on its own, because counting it is slow.
   const [locations, setLocations] = useState<StorageLocations | null>(null);
   const [appDataBytes, setAppDataBytes] = useState<number | null>(null);
   const [filesError, setFilesError] = useState<string | null>(null);
@@ -188,9 +189,9 @@ export default function Settings({
     }
   };
 
-  // Read each time General opens, so a size or a folder changed meanwhile is current.
+  // Read each time Files opens, so a size or a folder changed meanwhile is current.
   useEffect(() => {
-    if (section !== "general") return;
+    if (section !== "files") return;
     let live = true;
     invoke<StorageLocations>("storage_locations")
       .then((said) => live && setLocations(said))
@@ -745,13 +746,15 @@ export default function Settings({
                       </div>
                     ) : null}
                   </div>
+                </section>
+              ) : null}
 
-                  <div className="mt-2">
-                    <SectionHead
-                      title="Files"
-                      note="Where nurb keeps what you make. Your parts live in the library, not as separate files."
-                    />
-                  </div>
+              {section === "files" ? (
+                <section className="flex flex-col gap-3.5 px-7 py-5.5">
+                  <SectionHead
+                    title="Files"
+                    note="Where nurb keeps what you make. Your parts live in the library, not as separate files."
+                  />
                   <div className="flex flex-col gap-2.5 border-y border-line-soft py-2.5">
                     {fileRow(
                       "Library",

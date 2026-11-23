@@ -1,4 +1,4 @@
-// What General > Files shows, as the shell reports it (src-tauri/src/files.rs).
+// What Settings > Files shows, as the shell reports it (src-tauri/src/files.rs).
 export type StorageLocations = {
   library: { path: string; bytes: number | null };
   exports: { path: string; custom: boolean; missing: string | null };

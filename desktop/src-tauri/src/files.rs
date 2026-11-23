@@ -1,4 +1,4 @@
-//! Where the app keeps what it writes, for General > Files: the library the
+//! Where the app keeps what it writes, for Settings > Files: the library the
 //! engine owns, the folder exports are saved to, and the app's own data.
 //!
 //! Exports default to Downloads. A chosen folder is remembered in the data
