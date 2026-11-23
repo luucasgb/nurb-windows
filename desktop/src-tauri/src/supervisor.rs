@@ -756,7 +756,8 @@ server.serve_forever()
             // Held open for the rest of the test run: this process stays its parent.
             std::mem::forget(child);
         }
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // Generous: a CI runner's first python3 can take seconds before it listens.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let port: u16 = loop {
             if let Ok(text) = std::fs::read_to_string(dir.join("port")) {
                 break text.parse().unwrap();

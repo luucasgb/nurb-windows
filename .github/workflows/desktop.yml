@@ -53,5 +53,10 @@ jobs:
       - run: sh desktop/scripts/stage.sh
         shell: bash
 
+      # The supervisor tests run stand-in serves on the system python3: say which
+      # one, and pay its first-run cost before their own deadlines start.
+      - if: runner.os == 'macOS'
+        run: command -v python3 && python3 --version && python3 -c "import http.server, json"
+
       - run: cargo test --locked
         working-directory: desktop/src-tauri

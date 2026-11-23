@@ -395,21 +395,18 @@ fn merge_path(shell: Option<&str>, inherited: Option<&str>) -> String {
 
 /// The bundled uv sidecar: Tauri strips the target-triple suffix and places
 /// it next to the app executable (Contents/MacOS in a bundle, target/debug
-/// during dev; tests run one level down in deps/).
+/// during dev). Test binaries run below that profile directory, in deps/ or,
+/// with current cargo, build/<pkg>/<hash>/out/, so the nearest copy within a
+/// few levels up is the one; an installed app finds it in its own folder.
 pub fn uv_sidecar() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("no current exe: {e}"))?;
     let dir = exe.parent().ok_or("current exe has no parent")?;
-    let dir = if dir.ends_with("deps") {
-        dir.parent().unwrap()
-    } else {
-        dir
-    };
-    let uv = dir.join(crate::platform::exe("uv"));
-    if uv.is_file() {
-        Ok(uv)
-    } else {
-        Err(format!("bundled uv missing at {}", uv.display()))
-    }
+    let name = crate::platform::exe("uv");
+    dir.ancestors()
+        .take(5)
+        .map(|dir| dir.join(&name))
+        .find(|uv| uv.is_file())
+        .ok_or_else(|| format!("bundled uv missing at {}", dir.join(&name).display()))
 }
 
 #[cfg(all(test, unix))]
