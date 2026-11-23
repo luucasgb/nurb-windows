@@ -36,7 +36,7 @@ import { readCrashReports, setCrashReports } from "./crashReports";
 import { syncWindowTheme } from "./windowTheme";
 import About from "./About";
 import { AGENT_LABEL } from "./Chat";
-import { computer } from "./platform";
+import { computer, isWindows } from "./platform";
 
 type SettingsAgent = {
   id: string;
@@ -116,6 +116,8 @@ export default function Settings({
   onClose,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  // A menu item can ask for a section while the panel is already open (Help > About).
+  useEffect(() => setSection(initialSection), [initialSection]);
   const [soundPrefs, setSoundPrefs] = useState(readSoundPrefs);
   const [theme, setTheme] = useState(readThemeChoice);
   // Null until the shell answers, so the switch never flashes the wrong way.
@@ -218,8 +220,8 @@ export default function Settings({
         <FloatingHeader
           cells={
             <>
-              <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />
-              <HeaderDivider />
+              {!isWindows && <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />}
+              {!isWindows && <HeaderDivider />}
               <HeaderCell>
                 <Lockup />
               </HeaderCell>

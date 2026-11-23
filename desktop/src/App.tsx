@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ask, message, open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -46,6 +46,8 @@ import { openInSlicer, saveToDownloads } from "./downloads";
 import { isDraft, messagesForPart, moveTargets, titleCase } from "./parts";
 import ProjectPicker from "./ProjectPicker";
 import SharedPartDialog from "./SharedPartDialog";
+import UpdateDialog, { type UpdateCheck } from "./UpdateDialog";
+import { isWindows } from "./platform";
 import Setup from "./Setup";
 import Settings, { type AboutInfo, type SettingsSection } from "./Settings";
 import { broughtOver, importV1Folders, notBroughtOver } from "./v1Import";
@@ -165,6 +167,7 @@ function App() {
   const agentStatusRequests = useRef(createLatestRequestGate());
   const [signingIn, setSigningIn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
 
   const [defaultAgent, setDefaultAgent] = useState(
     () => localStorage.getItem("nurb-default-agent") ?? "claude",
@@ -523,23 +526,15 @@ function App() {
   // Asked for by the macOS menu item, which lives in Rust, and by About.
   const checkUpdatesNow = useCallback(async () => {
     if (!import.meta.env.PROD) return;
+    // The answer, a failed check included, goes to UpdateDialog: the error
+    // banner lives on the part screen, and About is usually asked from Settings.
     try {
       const next = await findUpdate();
-      if (!next) {
-        await message("You're on the newest version.", { title: "nurb" });
-      } else if (
-        await ask(`nurb ${next.version} is ready to install.`, {
-          title: "nurb",
-          okLabel: "Restart & Update",
-          cancelLabel: "Later",
-        })
-      ) {
-        await installUpdate();
-      }
+      setUpdateCheck(next ? { kind: "ready", version: next.version } : { kind: "current" });
     } catch (e) {
-      setError(String(e));
+      setUpdateCheck({ kind: "failed", reason: String(e) });
     }
-  }, [findUpdate, installUpdate]);
+  }, [findUpdate]);
 
   useEffect(() => {
     const unlisten = listen("menu:check-updates", () => void checkUpdatesNow());
@@ -552,7 +547,7 @@ function App() {
   // and still act on this render's state.
   const shortcuts = useRef<Record<string, () => void>>({});
   useEffect(() => {
-    const unlisten = ["new-part", "import-folder", "find", "library", "settings"].map((action) =>
+    const unlisten = ["new-part", "import-folder", "find", "library", "settings", "about"].map((action) =>
       listen(`menu:${action}`, () => shortcuts.current[action]?.()),
     );
     return () => {
@@ -973,6 +968,8 @@ function App() {
             setScreen("library");
           },
           settings: () => setSettingsSection((section) => section ?? "agents"),
+          // Help > About nurb on Windows, whose own About is a system message box.
+          about: () => setSettingsSection("about"),
         };
 
   const chatAgents = agentStatuses
@@ -1061,9 +1058,10 @@ function App() {
           header={{
             before: (
               <>
-                {/* The window's own buttons are painted here by macOS. */}
-                <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />
-                <div className="h-full w-px bg-line" />
+                {/* The window's own buttons are painted here by macOS. Windows
+                    keeps a native title bar, so there is no gap to leave. */}
+                {!isWindows && <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />}
+                {!isWindows && <div className="h-full w-px bg-line" />}
               </>
             ),
             nav: (
@@ -1226,6 +1224,17 @@ function App() {
             onClose={() => setSettingsSection(null)}
           />
         </div>
+      ) : null}
+
+      {updateCheck ? (
+        <UpdateDialog
+          check={updateCheck}
+          onInstall={() => {
+            setUpdateCheck(null);
+            void installUpdate();
+          }}
+          onClose={() => setUpdateCheck(null)}
+        />
       ) : null}
 
       {shared ? (

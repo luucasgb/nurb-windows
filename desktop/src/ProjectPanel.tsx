@@ -13,6 +13,7 @@ import {
 } from "@nurb/ui";
 import { useLive } from "@nurb/workbench/live";
 import { getSystem, setMeasurement, setSetting, type ProjectSystem } from "@nurb/workbench/api";
+import { isWindows } from "./platform";
 
 // Sheet 31: a project read as a system. The numbers its shared files agree on, the
 // measurements taken off the real thing, and the pieces its parts are built from.
@@ -121,8 +122,8 @@ export default function ProjectPanel({
           dragRegion
           cells={
             <>
-              <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />
-              <HeaderDivider />
+              {!isWindows && <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />}
+              {!isWindows && <HeaderDivider />}
               <HeaderCell>
                 <Lockup />
               </HeaderCell>

@@ -310,6 +310,21 @@ fn install_menu(app: &AppHandle) -> tauri::Result<()> {
         )?;
     }
     if let Some(help) = menu.get(HELP_SUBMENU_ID).and_then(|i| i.as_submenu().cloned()) {
+        // Windows' default Help menu carries a predefined About, which is a
+        // system message box with its own chime. The app's About is the
+        // Settings section the page already draws, so the item opens that.
+        #[cfg(windows)]
+        {
+            for item in help.items()? {
+                if item.as_predefined_menuitem().is_some() {
+                    help.remove(&item)?;
+                }
+            }
+            help.append_items(&[
+                &MenuItem::with_id(app, "shortcut:about", "About nurb", true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
+            ])?;
+        }
         help.append_items(&[
             &MenuItem::with_id(app, "help:github", "nurb on GitHub", true, None::<&str>)?,
             &MenuItem::with_id(app, "help:issue", "Report an Issue", true, None::<&str>)?,

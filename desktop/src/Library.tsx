@@ -38,7 +38,7 @@ import {
   type ProjectSummary,
 } from "@nurb/workbench/api";
 import { folders, isDraft, matchesSearch, partsIn, sortParts, titleCase, type LibrarySort } from "./parts";
-import { computer } from "./platform";
+import { computer, isWindows } from "./platform";
 
 const SORTS: Record<LibrarySort, string> = { built: "Last built", name: "Name" };
 const SORT_KEY = "nurb.librarySort";
@@ -326,9 +326,9 @@ export default function Library({
       dragRegion
       start={
         <>
-          {/* The window's own buttons are painted here by macOS. */}
-          <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />
-          <HeaderDivider />
+          {/* The window's own buttons are painted here by macOS; Windows has a title bar. */}
+          {!isWindows && <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />}
+          {!isWindows && <HeaderDivider />}
           <HeaderCell>
             <Lockup />
           </HeaderCell>
