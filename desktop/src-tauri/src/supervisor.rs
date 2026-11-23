@@ -718,7 +718,7 @@ mod tests {
             dir.join("serve.py"),
             format!(
                 r#"
-import http.server, json, os, signal, sys
+import http.server, json, os, signal, socketserver, sys
 if {ignores_term}: signal.signal(signal.SIGTERM, signal.SIG_IGN)
 health = {{"ok": True, "pid": os.getpid()}}
 if {version} is not None: health["version"] = {version}
@@ -730,8 +730,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *args): pass
-server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-with open("port.tmp", "w") as f: f.write(str(server.server_port))
+# TCPServer, not HTTPServer: HTTPServer resolves 127.0.0.1's name on bind, and that
+# reverse lookup takes ~35s on GitHub's macOS runners.
+server = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+with open("port.tmp", "w") as f: f.write(str(server.server_address[1]))
 os.rename("port.tmp", "port")
 server.serve_forever()
 "#,
@@ -757,8 +759,7 @@ server.serve_forever()
             // Held open for the rest of the test run: this process stays its parent.
             std::mem::forget(child);
         }
-        // Generous: a CI runner's first python3 can take seconds before it listens.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(10);
         let port: u16 = loop {
             if let Ok(text) = std::fs::read_to_string(dir.join("port")) {
                 break text.parse().unwrap();
