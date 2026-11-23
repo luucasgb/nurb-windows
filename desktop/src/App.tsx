@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ask, message, open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 import { check, Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
@@ -42,10 +42,12 @@ import EngineStarting from "./EngineStarting";
 import { createLatestRequestGate } from "./latestRequest";
 import Library from "./Library";
 import ProjectPanel from "./ProjectPanel";
-import { openInSlicer, saveToDownloads } from "./downloads";
+import { openInSlicer, saveExport } from "./downloads";
 import { isDraft, messagesForPart, moveTargets, titleCase } from "./parts";
 import ProjectPicker from "./ProjectPicker";
 import SharedPartDialog from "./SharedPartDialog";
+import UpdateDialog, { type UpdateCheck } from "./UpdateDialog";
+import { isWindows } from "./platform";
 import Setup from "./Setup";
 import Settings, { type AboutInfo, type SettingsSection } from "./Settings";
 import { broughtOver, importV1Folders, notBroughtOver } from "./v1Import";
@@ -71,7 +73,9 @@ type AgentStatus = {
   label: string;
   installed: boolean;
   loggedIn: boolean | null;
+  account: string | null;
   detail: string | null;
+  canSignOut: boolean;
   note: string;
   install: string | null;
 };
@@ -165,6 +169,7 @@ function App() {
   const agentStatusRequests = useRef(createLatestRequestGate());
   const [signingIn, setSigningIn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
 
   const [defaultAgent, setDefaultAgent] = useState(
     () => localStorage.getItem("nurb-default-agent") ?? "claude",
@@ -180,6 +185,8 @@ function App() {
   const [showAddAgent, setShowAddAgent] = useState(false);
   const [showGeminiKey, setShowGeminiKey] = useState(false);
   const geminiKeyResolver = useRef<((key: string | null) => void) | null>(null);
+  // The key being replaced, so the prompt says which one; null when adding Gemini.
+  const [replacingGeminiKey, setReplacingGeminiKey] = useState<string | null>(null);
 
   // One pod for work the window should mention: an export the part page started,
   // a build that landed on a part nobody is looking at.
@@ -523,23 +530,15 @@ function App() {
   // Asked for by the macOS menu item, which lives in Rust, and by About.
   const checkUpdatesNow = useCallback(async () => {
     if (!import.meta.env.PROD) return;
+    // The answer, a failed check included, goes to UpdateDialog: the error
+    // banner lives on the part screen, and About is usually asked from Settings.
     try {
       const next = await findUpdate();
-      if (!next) {
-        await message("You're on the newest version.", { title: "nurb" });
-      } else if (
-        await ask(`nurb ${next.version} is ready to install.`, {
-          title: "nurb",
-          okLabel: "Restart & Update",
-          cancelLabel: "Later",
-        })
-      ) {
-        await installUpdate();
-      }
+      setUpdateCheck(next ? { kind: "ready", version: next.version } : { kind: "current" });
     } catch (e) {
-      setError(String(e));
+      setUpdateCheck({ kind: "failed", reason: String(e) });
     }
-  }, [findUpdate, installUpdate]);
+  }, [findUpdate]);
 
   useEffect(() => {
     const unlisten = listen("menu:check-updates", () => void checkUpdatesNow());
@@ -552,7 +551,7 @@ function App() {
   // and still act on this render's state.
   const shortcuts = useRef<Record<string, () => void>>({});
   useEffect(() => {
-    const unlisten = ["new-part", "import-folder", "find", "library", "settings"].map((action) =>
+    const unlisten = ["new-part", "import-folder", "find", "library", "settings", "about"].map((action) =>
       listen(`menu:${action}`, () => shortcuts.current[action]?.()),
     );
     return () => {
@@ -599,11 +598,13 @@ function App() {
 
   const finishGeminiKey = (key: string | null) => {
     setShowGeminiKey(false);
+    setReplacingGeminiKey(null);
     geminiKeyResolver.current?.(key);
     geminiKeyResolver.current = null;
   };
 
-  const signInAgent = async (id: string): Promise<boolean> => {
+  const signInAgent = async (id: string, replacing: string | null = null): Promise<boolean> => {
+    if (id === "gemini") setReplacingGeminiKey(replacing);
     const apiKey = id === "gemini" ? await requestGeminiKey() : null;
     if (id === "gemini" && apiKey === null) return false;
     setSigningIn(id);
@@ -618,6 +619,28 @@ function App() {
     } finally {
       setSigningIn(null);
     }
+  };
+
+  // The sign-in is the agent's own and shared with its terminal install, so
+  // signing out goes through the agent too and leaves both agreeing.
+  const signOutAgent = async (id: string): Promise<void> => {
+    setError(null);
+    try {
+      await invoke("agent_logout", { agent: id });
+    } finally {
+      await refreshAgents().catch(() => {});
+    }
+  };
+
+  // Gemini's key is replaced in place and only once the new one connects; an
+  // agent with an account of its own is signed out, then signed in again.
+  const switchAgent = async (id: string): Promise<boolean> => {
+    if (id === "gemini") {
+      const current = agentStatuses.find((status) => status.id === id)?.account ?? null;
+      return signInAgent(id, current);
+    }
+    await signOutAgent(id);
+    return signInAgent(id);
   };
 
   // A new part is its own container until the person puts it in a project, so
@@ -973,6 +996,8 @@ function App() {
             setScreen("library");
           },
           settings: () => setSettingsSection((section) => section ?? "agents"),
+          // Help > About nurb on Windows, whose own About is a system message box.
+          about: () => setSettingsSection("about"),
         };
 
   const chatAgents = agentStatuses
@@ -990,6 +1015,7 @@ function App() {
       <AddAgent
         missing={agentStatuses.filter((status) => !status.installed)}
         onSubmitGeminiKey={showGeminiKey ? finishGeminiKey : undefined}
+        replacingGeminiKey={showGeminiKey ? replacingGeminiKey : null}
         onClose={() => {
           setShowAddAgent(false);
           if (showGeminiKey) finishGeminiKey(null);
@@ -1053,7 +1079,7 @@ function App() {
           onPointAt={(text) => projectId && setComposerSeed({ projectId, part: chatPart, text })}
           onPartRenamed={(was, name) => projectId && partRenamed(projectId, was, name)}
           onManagePrinters={() => setSettingsSection("printers")}
-          onSaveFile={saveToDownloads}
+          onSaveFile={saveExport}
           onOpenInSlicer={openInSlicer}
           onCopyText={writeText}
           onOpenLink={(url) => void openUrl(url).catch(() => {})}
@@ -1061,9 +1087,10 @@ function App() {
           header={{
             before: (
               <>
-                {/* The window's own buttons are painted here by macOS. */}
-                <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />
-                <div className="h-full w-px bg-line" />
+                {/* The window's own buttons are painted here by macOS. Windows
+                    keeps a native title bar, so there is no gap to leave. */}
+                {!isWindows && <div className="h-full w-[92px] shrink-0" data-tauri-drag-region />}
+                {!isWindows && <div className="h-full w-px bg-line" />}
               </>
             ),
             nav: (
@@ -1222,10 +1249,23 @@ function App() {
             onCheckUpdates={import.meta.env.PROD ? () => void checkUpdatesNow() : undefined}
             initialSection={settingsSection}
             onSignIn={signInAgent}
+            onSignOut={signOutAgent}
+            onSwitch={switchAgent}
             onMoreAgents={() => setShowAddAgent(true)}
             onClose={() => setSettingsSection(null)}
           />
         </div>
+      ) : null}
+
+      {updateCheck ? (
+        <UpdateDialog
+          check={updateCheck}
+          onInstall={() => {
+            setUpdateCheck(null);
+            void installUpdate();
+          }}
+          onClose={() => setUpdateCheck(null)}
+        />
       ) : null}
 
       {shared ? (

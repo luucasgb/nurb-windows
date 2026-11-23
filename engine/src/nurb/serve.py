@@ -136,11 +136,18 @@ def read_state():
 
 
 def _take_lock(home):
-    import fcntl
-
     fd = os.open(home / LOCK, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if sys.platform == "win32":
+            import msvcrt
+
+            # Windows has no flock. A lock on the first byte is just as exclusive,
+            # and it too goes when the handle closes or the process dies.
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
         return None
@@ -182,7 +189,11 @@ def _is_free(port):
     import socket
 
     with socket.socket() as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if sys.platform == "win32":
+            # On Windows SO_REUSEADDR can bind a port another server is listening on.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", port))
             return True
@@ -225,18 +236,34 @@ def read_connect(home):
     }
 
 
+def _settle(change):
+    """Replace or remove a state file. Windows refuses either while any other process
+    has the file open (a reader, a second serve, antivirus scanning the fresh file),
+    so there the change is retried for up to two seconds before it is an error."""
+    if sys.platform != "win32":
+        return change()
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            return change()
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def _write_connect(home, token, port):
     tmp = home / (CONNECT + ".tmp")
     tmp.write_text(json.dumps({"token": token, "port": port}), encoding="utf-8")
     os.chmod(tmp, 0o600)  # it carries the token
-    os.replace(tmp, home / CONNECT)
+    _settle(lambda: os.replace(tmp, home / CONNECT))
 
 
 def _publish(home, payload):
     tmp = home / (STATE + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.chmod(tmp, 0o600)  # it carries the token
-    os.replace(tmp, home / STATE)
+    _settle(lambda: os.replace(tmp, home / STATE))
 
 
 class _Bearer:
@@ -2481,7 +2508,7 @@ def run(port=None):
         raise AlreadyServing(_published_url())
     # Holding the lock proves any published state belongs to a dead predecessor.
     # Remove it before initialization so a racing second serve cannot report it.
-    (home / STATE).unlink(missing_ok=True)
+    _settle(lambda: (home / STATE).unlink(missing_ok=True))
 
     connect = read_connect(home)
     port = _pick_port(port, connect["port"])
@@ -2539,8 +2566,10 @@ def run(port=None):
         pass
     finally:
         # A stale file after a crash is fine; leaving one behind on a clean exit is
-        # a client waiting 20 seconds on a port nobody is listening to.
-        (home / STATE).unlink(missing_ok=True)
+        # a client waiting 20 seconds on a port nobody is listening to. Still, the
+        # rest of the shutdown must run even if a reader holds it open on Windows.
+        with contextlib.suppress(PermissionError):
+            _settle(lambda: (home / STATE).unlink(missing_ok=True))
         stop.set()
         wake.set()
         conn.close()

@@ -66,7 +66,8 @@ def write_project_files(conn, project_id, root):
 
 
 def materialize(conn, project_id, into=None):
-    private = into is None and not os.environ.get("NURB_HOME")
+    # On Windows the inherited profile ACL is what keeps scratch private (see db.home).
+    private = into is None and not os.environ.get("NURB_HOME") and os.name != "nt"
     directory_mode = 0o700 if private else 0o777
     if into:
         root = pathlib.Path(into)

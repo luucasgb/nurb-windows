@@ -3,6 +3,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { brand, Button, TaskSteps } from "@nurb/ui";
 import { setupReportUrl } from "./setupReport";
+import { computer, osName } from "./platform";
 
 type ProvisionEvent =
   | { kind: "stage"; stage: string }
@@ -71,7 +72,7 @@ export default function Setup({ onDone }: { onDone: () => void }) {
         `app ${about.appVersion}`,
         `CAD engine ${about.nurbVersion}`,
         about.occtVersion ? `OCCT ${about.occtVersion}` : null,
-        `macOS ${about.osVersion} (${about.arch})`,
+        `${osName(about.osVersion)} (${about.arch})`,
       ]
         .filter(Boolean)
         .join("\n");
@@ -109,7 +110,7 @@ export default function Setup({ onDone }: { onDone: () => void }) {
         <div className="flex flex-col p-7">
           <img src={brand.markSmall} alt="" aria-hidden="true" className="size-10 shrink-0" />
           <h1 className="font-display mt-5 text-[22px] leading-7 tracking-[-0.02em] text-ink">Setting up your workshop</h1>
-          <p className="mt-2 text-[14px] leading-[22px] text-ink-soft">Takes a minute the first time. Your parts stay on this Mac.</p>
+          <p className="mt-2 text-[14px] leading-[22px] text-ink-soft">Takes a minute the first time. Your parts stay on this {computer}.</p>
           <TaskSteps
             className="mt-6"
             label="Setup progress"

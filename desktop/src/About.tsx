@@ -1,10 +1,11 @@
 import { useState, type ReactNode } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { brand, Button, Icon } from "@nurb/ui";
+import { Button, Icon, Lockup } from "@nurb/ui";
 import lgpl from "./licenses/OCCT_LICENSE_LGPL_21.txt?raw";
 import occtException from "./licenses/OCCT_LGPL_EXCEPTION.txt?raw";
 import uvMit from "./licenses/UV_LICENSE_MIT.txt?raw";
+import { osName } from "./platform";
 
 type Props = {
   appVersion: string;
@@ -66,7 +67,7 @@ export default function About({
     `app ${appVersion}`,
     `CAD engine ${nurbVersion}`,
     occtVersion ? `OCCT ${occtVersion}` : null,
-    `macOS ${osVersion} (${arch})`,
+    `${osName(osVersion)} (${arch})`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -83,7 +84,7 @@ export default function About({
     `Version ${appVersion}`,
     `Engine ${nurbVersion}`,
     occtVersion ? `Kernel OCCT ${occtVersion}` : null,
-    `macOS ${osVersion}`,
+    osName(osVersion),
     arch,
   ]
     .filter(Boolean)
@@ -92,7 +93,8 @@ export default function About({
   return (
     <>
       <section className="flex flex-col gap-4.5 px-7 pt-5.5 pb-7">
-        <img src={brand.lockup} alt="nurb" className="h-9 w-[130px] shrink-0" />
+        {/* The inlined lockup, so the wordmark takes the ink colour in dark mode. */}
+        <Lockup size="about" />
         <div className="font-mono text-[11px] leading-4 tracking-[0.02em] text-muted uppercase">
           {versionLine}
         </div>

@@ -9,7 +9,6 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,6 +21,7 @@ use tauri::Manager;
 
 use crate::agents;
 use crate::env::{uv_sidecar, Launcher, Paths, NODE_VERSION};
+use crate::platform::{NoWindow, OwnGroup};
 
 const PYTHON_VERSION: &str = "3.13";
 // Generous, because a slow check costs only time while a failed one throws the
@@ -35,6 +35,7 @@ const NPM_CI_ARGS: &[&str] = &["ci", "--include=optional", "--no-fund", "--no-au
 static PROBE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Published SHASUMS256 entries for the pinned Node tarballs.
+#[cfg(not(windows))]
 const NODE_SHA256: &[(&str, &str)] = &[
     (
         "aarch64",
@@ -43,6 +44,19 @@ const NODE_SHA256: &[(&str, &str)] = &[
     (
         "x86_64",
         "d35e95230f46f6f0751df497c56622c6735e05d5e1fb1630996a005b9d328fe4",
+    ),
+];
+
+/// The same for the pinned Node zips Windows gets.
+#[cfg(windows)]
+const NODE_SHA256: &[(&str, &str)] = &[
+    (
+        "aarch64",
+        "8502f4a50b458d4cc38ed8f2001556c2cd239d464920f74017926ccb1e1c157f",
+    ),
+    (
+        "x86_64",
+        "57f71ab3652e797d84acddc79c81cc9ff1c6ddb2a1974cdb83f00fee9bff4c73",
     ),
 ];
 
@@ -87,9 +101,7 @@ impl Provisioner {
     pub fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         if let Some(pgid) = *self.pgid.lock().unwrap() {
-            unsafe {
-                libc::killpg(pgid, libc::SIGTERM);
-            }
+            crate::platform::killpg(pgid, crate::platform::SIGTERM);
         }
     }
 }
@@ -158,6 +170,7 @@ fn write_stamp(paths: &Paths, stamp: &Stamp) -> Result<(), String> {
 fn venv_runs(paths: &Paths, code: &str) -> bool {
     Command::new(paths.venv_python())
         .args(["-c", code])
+        .no_window()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -302,7 +315,7 @@ fn probe_output(
         .stdin(Stdio::null())
         .stdout(Stdio::from(output))
         .stderr(Stdio::from(errors))
-        .process_group(0);
+        .own_group();
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -322,9 +335,7 @@ fn probe_output(
                 std::thread::sleep(Duration::from_millis(25));
             }
             Ok(None) | Err(_) => {
-                unsafe {
-                    libc::killpg(pgid, libc::SIGKILL);
-                }
+                crate::platform::killpg(pgid, crate::platform::SIGKILL);
                 let _ = child.wait();
                 break Err(None);
             }
@@ -420,6 +431,7 @@ pub fn about_info(app: tauri::AppHandle) -> Result<AboutInfo, String> {
     let occt_version = std::fs::read_to_string(dir.join("requirements.lock"))
         .ok()
         .and_then(|lock| occt_version(&lock));
+    #[cfg(not(windows))]
     let os_version = std::process::Command::new("sw_vers")
         .arg("-productVersion")
         .output()
@@ -428,6 +440,8 @@ pub fn about_info(app: tauri::AppHandle) -> Result<AboutInfo, String> {
         .and_then(|out| String::from_utf8(out.stdout).ok())
         .map(|v| v.trim().to_string())
         .unwrap_or_else(|| "unknown".into());
+    #[cfg(windows)]
+    let os_version = crate::platform::windows::os_version().unwrap_or_else(|| "unknown".into());
     Ok(AboutInfo {
         app_version,
         nurb_version,
@@ -624,9 +638,15 @@ fn provision_chat(
         .find(|(arch, _)| *arch == std::env::consts::ARCH)
         .ok_or_else(|| format!("unsupported architecture: {}", std::env::consts::ARCH))?;
     let arch = if *arch == "aarch64" { "arm64" } else { "x64" };
-    let tarball_name = format!("node-{NODE_VERSION}-darwin-{arch}.tar.xz");
+    // Windows gets a zip, unpacked by the bsdtar that ships in System32 beside
+    // curl, so neither depends on what the user installed.
+    let tarball_name = if cfg!(windows) {
+        format!("node-{NODE_VERSION}-win-{arch}.zip")
+    } else {
+        format!("node-{NODE_VERSION}-darwin-{arch}.tar.xz")
+    };
     let tarball = paths.data().join(&tarball_name);
-    let mut download = Command::new("/usr/bin/curl");
+    let mut download = Command::new(system_tool("curl"));
     download
         .args(["-fSL", "--retry", "3", "-o"])
         .arg(&tarball)
@@ -645,9 +665,9 @@ fn provision_chat(
             .map_err(|e| format!("could not clear the old runtime: {e}"))?;
     }
     std::fs::create_dir_all(paths.node_dir()).map_err(|e| e.to_string())?;
-    let mut extract = Command::new("/usr/bin/tar");
+    let mut extract = Command::new(system_tool("tar"));
     extract
-        .arg("-xJf")
+        .arg(if cfg!(windows) { "-xf" } else { "-xJf" })
         .arg(&tarball)
         .arg("-C")
         .arg(paths.node_dir())
@@ -685,6 +705,17 @@ fn provision_chat(
     chat_runtime_check(paths).map_err(|why| format!("the agent install finished, but {why}"))
 }
 
+/// curl and tar from the OS itself: /usr/bin on macOS, System32 on Windows.
+fn system_tool(name: &str) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+        PathBuf::from(root).join("System32").join(format!("{name}.exe"))
+    }
+    #[cfg(not(windows))]
+    PathBuf::from("/usr/bin").join(name)
+}
+
 fn stage(channel: &Channel<ProvisionEvent>, stage: &'static str) {
     let _ = channel.send(ProvisionEvent::Stage { stage });
 }
@@ -705,7 +736,7 @@ fn run_step(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .process_group(0);
+        .own_group();
     let mut child = command
         .spawn()
         .map_err(|e| format!("could not start {what}: {e}"))?;
@@ -714,9 +745,7 @@ fn run_step(
     // A shutdown can land between the check above and the spawn; now that the
     // pgid is published, re-check so that window cannot leak the child.
     if provisioner.shutting_down.load(Ordering::SeqCst) {
-        unsafe {
-            libc::killpg(pgid, libc::SIGTERM);
-        }
+        crate::platform::killpg(pgid, crate::platform::SIGTERM);
     }
     let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let readers = [
@@ -777,6 +806,7 @@ fn stream_lines(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use std::time::Duration;
@@ -819,6 +849,8 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    // These fakes are shell scripts, so they run where /bin/sh does.
+    #[cfg(unix)]
     #[test]
     fn health_probe_requires_the_expected_version_and_cannot_hang() {
         let dir = std::env::temp_dir();
@@ -857,6 +889,7 @@ mod tests {
     }
 
     /// A venv whose interpreter is a real python with `site` on its path.
+    #[cfg(unix)]
     fn fake_venv(site: &std::path::Path) -> Paths {
         let dir = std::env::temp_dir().join(format!(
             "nurb-parts-check-{}-{}",
@@ -899,6 +932,7 @@ mod tests {
     // The launch check runs before the window has anything to draw behind it,
     // so it must never pay for the OCCT import (issue #338). A package that
     // raises on import is how a test can tell the check never imported it.
+    #[cfg(unix)]
     #[test]
     fn the_launch_check_finds_nurb_without_importing_it() {
         let site = fake_site("raise SystemExit(1)");
@@ -993,6 +1027,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
 
     // The update path against the real uv: nurb changes, and the rest of the
     // environment is the same files as before (issue #333).
+    #[cfg(unix)]
     #[test]
     fn a_new_wheel_replaces_nurb_and_keeps_the_environment() {
         let paths = Paths::new(scratch_dir("update"));
@@ -1061,6 +1096,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
         std::fs::remove_dir_all(paths.data()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn only_a_matching_lock_and_python_keep_the_environment() {
         let paths = Paths::new(scratch_dir("reusable"));
@@ -1120,6 +1156,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
             .any(|args| args == ["ci", "--include=optional"]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn chat_health_exercises_the_native_agent_cli() {
         let dir = std::env::temp_dir().join(format!(

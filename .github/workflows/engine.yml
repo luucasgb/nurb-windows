@@ -11,14 +11,22 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     # The serve tests boot a fresh engine each and are half the suite's time, so they get
-    # their own runner. Public repos run parallel jobs for free.
+    # their own runner. Public repos run parallel jobs for free. Every platform the app
+    # ships on runs both shards: the engine is the same code, but locks, ports, paths and
+    # processes are not.
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
         shard:
           - tests/test_serve.py
           - tests --ignore=tests/test_serve.py
+    # bash everywhere, so the workbench build's sh script runs on Windows too (Git Bash).
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 

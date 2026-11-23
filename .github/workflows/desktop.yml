@@ -1,0 +1,57 @@
+name: desktop
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "engine/**"
+      - "packages/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/desktop.yml"
+
+# The desktop shell on each platform it ships for. The crate's tests include the
+# agent sandbox's own: Seatbelt on macOS, the write-restricted token on Windows.
+# Each leg is that security property checked by the kernel the user will have,
+# and the one place a change made on one platform shows it broke the other.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # stage.sh builds the engine wheel and exports its lock; the provisioning tests
+      # also drive uv directly.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - run: npm ci
+
+      # The page tauri embeds, and the bundle inputs the build script checks for
+      # (the wheel, the locks, and the uv sidecar for this platform). Both scripts
+      # are sh; on Windows that is the runner's Git Bash.
+      - run: npm run build --workspace desktop
+        shell: bash
+      - run: sh desktop/scripts/stage.sh
+        shell: bash
+
+      - run: cargo test --locked
+        working-directory: desktop/src-tauri

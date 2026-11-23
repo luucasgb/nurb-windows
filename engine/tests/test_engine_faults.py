@@ -162,10 +162,16 @@ def post_mcp(url, body, token):
 @contextlib.contextmanager
 def serving(home, port):
     log = home / "test-serve.log"
+    command, env = SERVE, {**os.environ, "NURB_HOME": str(home)}
+    if sys.platform == "win32" and sys.executable != sys._base_executable:
+        # A Windows venv's python.exe is a launcher, not the serve: killing it leaves
+        # the serve holding the database a moment longer. See test_serve.serving.
+        command = [sys._base_executable, *SERVE[1:]]
+        env["__PYVENV_LAUNCHER__"] = sys.executable
     with open(log, "w", encoding="utf-8") as sink:
         proc = subprocess.Popen(
-            [*SERVE, "--port", str(port)],
-            env={**os.environ, "NURB_HOME": str(home)},
+            [*command, "--port", str(port)],
+            env=env,
             stdout=sink,
             stderr=sink,
         )

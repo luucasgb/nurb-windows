@@ -12,6 +12,7 @@ use tauri::Manager;
 
 use crate::acp::sandbox;
 use crate::agents::AgentKind;
+use crate::platform::NoWindow;
 
 const ASK: &str = "Name the 3D-printable part this person wants in 2 to 4 plain words, \
 title case, no quotes. Reply with the name and nothing else.\n\nWhat they said: ";
@@ -82,6 +83,7 @@ pub async fn name_part(app: tauri::AppHandle, agent: String, text: String) -> Op
     let (program, args) = sandbox::wrap(program, args, &cwd, &launcher.engine_root());
     let mut command = tokio::process::Command::new(program);
     command
+        .no_window()
         .args(args)
         .env("PATH", launcher.adapter_path().unwrap_or_else(|| crate::env::user_path().into()))
         .current_dir(&cwd)

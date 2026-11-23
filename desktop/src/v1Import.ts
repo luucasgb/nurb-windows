@@ -10,7 +10,7 @@ export async function importV1Folders(
       await importOne(path);
       imported += 1;
     } catch (e) {
-      report(`${path.split("/").filter(Boolean).pop() ?? path} (${e instanceof Error ? e.message : String(e)})`);
+      report(`${path.split(/[\\/]/).filter(Boolean).pop() ?? path} (${e instanceof Error ? e.message : String(e)})`);
     }
   }
   return imported;

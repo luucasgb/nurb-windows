@@ -2,7 +2,7 @@
 # Stages what the desktop app bundles for first-launch provisioning: the nurb
 # wheel built from this checkout, its dependencies as pinned by uv.lock, the
 # committed adapter manifest/lock, and the uv sidecar binaries for both darwin
-# targets. Runs before every tauri dev/build (wheel and Python lock are cheap and
+# targets (or for x86_64 Windows, when run from Git Bash on Windows). Runs before every tauri dev/build (wheel and Python lock are cheap and
 # must track the checkout); the uv downloads are skipped once present.
 #
 # The lock's bytes decide whether an installed app keeps its environment, so they
@@ -26,6 +26,8 @@ cp "$adapter_runtime/package.json" "$tauri/resources/adapter-package.json"
 cp "$adapter_runtime/package-lock.json" "$tauri/resources/adapter-package-lock.json"
 
 for triple in aarch64-apple-darwin x86_64-apple-darwin; do
+  # A Windows build (Git Bash) bundles the Windows uv instead; see below.
+  [ -n "${WINDIR:-}" ] && break
   out="$tauri/binaries/uv-$triple"
   [ -x "$out" ] && continue
   echo "stage: downloading uv $UV_VERSION for $triple"
@@ -41,3 +43,22 @@ for triple in aarch64-apple-darwin x86_64-apple-darwin; do
   chmod +x "$out"
   rm -rf "$tmp"
 done
+
+# Windows: the same pinned uv, shipped as a zip with an .exe inside.
+if [ -n "${WINDIR:-}" ]; then
+  triple=x86_64-pc-windows-msvc
+  out="$tauri/binaries/uv-$triple.exe"
+  if [ ! -f "$out" ]; then
+    echo "stage: downloading uv $UV_VERSION for $triple"
+    tmp="$(mktemp -d)"
+    base="https://github.com/astral-sh/uv/releases/download/$UV_VERSION"
+    curl -fsSL "$base/uv-$triple.zip" -o "$tmp/uv.zip"
+    curl -fsSL "$base/uv-$triple.zip.sha256" -o "$tmp/uv.zip.sha256"
+    (cd "$tmp" && printf '%s  uv.zip\n' "$(cut -d' ' -f1 uv.zip.sha256)" | sha256sum -c - >/dev/null)
+    unzip -q "$tmp/uv.zip" -d "$tmp"
+    found="$(find "$tmp" -type f -name uv.exe | head -1)"
+    [ -n "$found" ] || { echo "stage: uv.exe not found in zip" >&2; exit 1; }
+    mv "$found" "$out"
+    rm -rf "$tmp"
+  fi
+fi

@@ -6,15 +6,15 @@ const markup = lockupSvg
   .replace('fill="#121821"', 'fill="currentColor"')
   .replace(/width="[\d.]+" height="[\d.]+"/, 'width="100%" height="100%"')
 
-// 65×18 in app headers, 87×24 where it stands on its own.
+// 65×18 in app headers, 87×24 where it stands on its own, 130×36 atop About.
 export default function Lockup({
   size = "header",
   onNavigate,
 }: {
-  size?: "header" | "panel"
+  size?: "header" | "panel" | "about"
   onNavigate?: () => void
 }) {
-  const dims = size === "panel" ? "h-6 w-[87px]" : "h-[18px] w-[65px]"
+  const dims = size === "about" ? "h-9 w-[130px]" : size === "panel" ? "h-6 w-[87px]" : "h-[18px] w-[65px]"
   const img = (
     <span
       role="img"

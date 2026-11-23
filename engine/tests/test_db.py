@@ -4,6 +4,7 @@ import json
 import pathlib
 import sqlite3
 import stat
+import sys
 
 import pytest
 
@@ -112,6 +113,7 @@ def test_multi_statement_helpers_remain_atomic(tmp_path):
         conn.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX mode bits for chmod to set")
 def test_default_state_permissions_are_private(monkeypatch, tmp_path):
     monkeypatch.delenv("NURB_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -133,6 +135,7 @@ def test_default_state_permissions_are_private(monkeypatch, tmp_path):
         conn.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX mode bits for chmod to set")
 def test_explicit_home_keeps_shared_permissions(monkeypatch, tmp_path):
     root = tmp_path / "shared"
     root.mkdir(mode=0o770)
@@ -241,7 +244,8 @@ def test_an_old_database_migrates_forward(tmp_path):
             folder.checkout(conn, "project", tmp_path / "checkout"),
             materialize.materialize(conn, "project", into=tmp_path / "scratch"),
         ):
-            assert stat.S_IMODE((out / "viewer.command").stat().st_mode) & 0o111
+            # Windows has no executable bit for a file to carry.
+            assert sys.platform == "win32" or stat.S_IMODE((out / "viewer.command").stat().st_mode) & 0o111
     finally:
         conn.close()
 

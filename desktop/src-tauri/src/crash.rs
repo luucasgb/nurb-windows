@@ -61,8 +61,15 @@ pub fn flush() {
 /// folder carries the account name, so both go before anything is sent.
 fn scrub(mut event: sentry::protocol::Event<'static>) -> Option<sentry::protocol::Event<'static>> {
     event.server_name = None;
-    let home = std::env::var("HOME").ok().filter(|home| home.len() > 1)?;
-    let text = serde_json::to_string(&event).ok()?;
+    let home = crate::platform::home()?.to_string_lossy().into_owned();
+    if home.len() <= 1 {
+        return None;
+    }
+    let mut text = serde_json::to_string(&event).ok()?;
+    // JSON writes a Windows path's backslashes doubled.
+    if cfg!(windows) {
+        text = scrub_text(&text, &home.replace('\\', "\\\\"));
+    }
     serde_json::from_str(&scrub_text(&text, &home)).ok()
 }
 
@@ -96,6 +103,7 @@ pub fn engine_error(title: &str, log: &str, probe: Option<&str>) {
 
 /// How much memory macOS considers free, 0 to 100: the level its
 /// memory-pressure killer acts on.
+#[cfg(not(windows))]
 fn memory_free_percent() -> Option<u32> {
     let mut level: u32 = 0;
     let mut size = std::mem::size_of::<u32>();
@@ -109,6 +117,15 @@ fn memory_free_percent() -> Option<u32> {
         )
     } == 0;
     ok.then_some(level)
+}
+
+/// The same on Windows: the share of physical memory not in use.
+#[cfg(windows)]
+fn memory_free_percent() -> Option<u32> {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    (unsafe { GlobalMemoryStatusEx(&mut status) } != 0).then(|| 100 - status.dwMemoryLoad.min(100))
 }
 
 #[derive(serde::Serialize)]

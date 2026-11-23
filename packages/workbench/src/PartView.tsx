@@ -248,12 +248,14 @@ export default function PartView({
   /** Opens the app's Settings screen, where the bench is managed. The served page has none. */
   onManagePrinters?: () => void
   /** Puts a downloaded file somewhere and says where. The desktop writes it to
-   * Downloads and shows it in Finder; without one the browser downloads it. */
+   * the export folder chosen in its settings (Downloads unless changed) and shows
+   * it there; without one the browser downloads it. */
   onSaveFile?: (filename: string, blob: Blob) => Promise<string | void>
   /** Puts a sentence naming a clicked spot on the part into this part's chat. */
   onPointAt?: (text: string) => void
-  /** Saves a file and opens it in the named slicer app. Only the desktop can. */
-  onOpenInSlicer?: (filename: string, blob: Blob, app: string) => Promise<void>
+  /** Saves a file and opens it in the named slicer app, resolving to the folder it
+   * was saved in. Only the desktop can. */
+  onOpenInSlicer?: (filename: string, blob: Blob, app: string) => Promise<string | void>
   /** The desktop's clipboard and browser; a page in a browser uses its own. */
   onCopyText?: (text: string) => Promise<void>
   onOpenLink?: (url: string) => void
@@ -684,8 +686,8 @@ export default function PartView({
     activity({ id, title: `Opening ${filename} in ${slicer.name}`, tone: "working" })
     try {
       const { blob, note } = await exportPart(part.id, "3mf", values)
-      await onOpenInSlicer(filename, blob, slicer.app)
-      const detail = note ? `Saved to Downloads. ${note}` : "Saved to Downloads"
+      const where = (await onOpenInSlicer(filename, blob, slicer.app)) || "Downloads"
+      const detail = note ? `Saved to ${where}. ${note}` : `Saved to ${where}`
       activity({ id, title: `Opening ${filename} in ${slicer.name}`, detail, tone: "done" })
     } catch (failure) {
       const detail = failure instanceof Error ? failure.message : `${slicer.name} did not open it.`

@@ -13,12 +13,22 @@
 //! temp and cache trees macOS assigns, and the state directories of the
 //! agents the app ships. If a future change wants a user-typed path or a
 //! setting here, it is the wrong change.
+//!
+//! Windows enforces the same contract with a write-restricted token instead
+//! of Seatbelt; see sandbox/windows.rs. Everything below is the macOS side.
 
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::{exec_from_args, wrap};
+
+#[cfg(not(windows))]
 use std::path::{Path, PathBuf};
 
 /// Wrap an adapter invocation in `sandbox-exec`. sandbox-exec applies the
 /// profile and execs the target in place, so the child pid, process group,
 /// and kill semantics the caller relies on are unchanged.
+#[cfg(not(windows))]
 pub(crate) fn wrap(
     program: String,
     args: Vec<String>,
@@ -33,6 +43,7 @@ pub(crate) fn wrap(
 /// The Seatbelt profile. Later rules win, so: allow everything, deny all
 /// writes, re-allow the app-derived writable roots, then shut the folders
 /// macOS guards with a permission prompt and re-open the roots the agent works in.
+#[cfg(not(windows))]
 fn profile(project: &Path, engine_root: &Path) -> String {
     let mut rules = String::new();
     let mut readable = String::new();
@@ -82,6 +93,7 @@ fn profile(project: &Path, engine_root: &Path) -> String {
 /// off one prompt per folder in nurb's name. Its project and attachments come
 /// from the app, so it never needs these, and a refused read lands in its own
 /// transcript instead of a dialog.
+#[cfg(not(windows))]
 fn private_folders() -> Vec<PathBuf> {
     let mut folders = vec![PathBuf::from("/Volumes")];
     if let Some(home) = home() {
@@ -94,6 +106,7 @@ fn private_folders() -> Vec<PathBuf> {
 
 /// The .app the running binary lives in. Opened straight from the mounted DMG it
 /// sits under /Volumes, and the adapters it bundles still have to be readable.
+#[cfg(not(windows))]
 fn app_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
     exe.ancestors()
@@ -106,6 +119,7 @@ fn app_bundle() -> Option<PathBuf> {
 /// Roots that do not exist are skipped: a rule for a missing path is dead
 /// weight, and everything here is created by macOS or the app before an
 /// adapter ever spawns.
+#[cfg(not(windows))]
 fn writable_roots(project: &Path, engine_root: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut push = |path: PathBuf| {
@@ -139,6 +153,7 @@ fn writable_roots(project: &Path, engine_root: &Path) -> Vec<PathBuf> {
     roots
 }
 
+#[cfg(not(windows))]
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -146,6 +161,7 @@ fn home() -> Option<PathBuf> {
 /// A Seatbelt string literal: double-quoted, with quotes and backslashes
 /// escaped ("Banana Holder" is a normal project name; quotes would be
 /// pathological but must not break out of the string).
+#[cfg(not(windows))]
 fn quoted(path: &Path) -> String {
     let escaped = path
         .display()
@@ -156,6 +172,7 @@ fn quoted(path: &Path) -> String {
 }
 
 /// A path made safe for use inside a Seatbelt regex literal.
+#[cfg(not(windows))]
 fn regex_escaped(path: &str) -> String {
     let mut out = String::new();
     for c in path.chars() {
@@ -167,7 +184,7 @@ fn regex_escaped(path: &str) -> String {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::*;
     use std::process::Command;
