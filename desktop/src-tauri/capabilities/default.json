@@ -9,6 +9,8 @@
     "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-theme",
+    "core:window:allow-set-background-color",
+    "core:webview:allow-set-webview-background-color",
     "core:event:default",
     "opener:default",
     "opener:allow-reveal-item-in-dir",

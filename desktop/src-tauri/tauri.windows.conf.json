@@ -4,6 +4,7 @@
     "windows": [
       {
         "title": "nurb",
+        "visible": false,
         "backgroundColor": "#e5f0fb",
         "width": 1440,
         "height": 900,

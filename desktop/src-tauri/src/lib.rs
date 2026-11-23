@@ -12,8 +12,11 @@ mod supervisor;
 mod v1;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use supervisor::{ServeInfo, Supervisor};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Manager, RunEvent, State};
 
 /// The app data directory, after the debug-only override. Commands that own
@@ -43,6 +46,34 @@ fn opened_links(app: &AppHandle, links: Vec<String>) {
         let _ = window.set_focus();
     }
     let _ = app.emit("open-links", ());
+}
+
+/// Windows creates the main window hidden (tauri.windows.conf.json). Created
+/// visible, it sat blank at the system's default spot while WebView2 started,
+/// then jumped to where the window-state plugin put it last time. Hidden, it is
+/// placed and sized first and shown once, when its page has loaded. macOS
+/// creates it visible, so setup disarms this there.
+struct Reveal(AtomicBool);
+
+impl Default for Reveal {
+    fn default() -> Self {
+        Self(AtomicBool::new(true))
+    }
+}
+
+/// How long a hidden window waits for its page before it is shown anyway: a
+/// page that never finishes loading must not leave the app running with no
+/// window at all.
+const REVEAL_DEADLINE: Duration = Duration::from_secs(5);
+
+fn reveal(app: &AppHandle) {
+    if !app.state::<Reveal>().0.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 /// The serve every project in this window talks to. Blocking, because a cold
@@ -361,6 +392,31 @@ pub fn sandbox_exec() -> Option<i32> {
     acp::sandbox::exec_from_args()
 }
 
+/// Size, position and maximized only: restoring visibility or decorations
+/// would fight the overlay title bar, and on Windows would show the window
+/// before its page loads, which is what `Reveal` waits for.
+fn window_state_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    let builder = tauri_plugin_window_state::Builder::new().with_state_flags(
+        tauri_plugin_window_state::StateFlags::SIZE
+            | tauri_plugin_window_state::StateFlags::POSITION
+            | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+    );
+    // A scratch data dir keeps its own window position too, so a test run
+    // neither moves the developer's nurb window nor is moved by it. Never
+    // compiled into release builds.
+    #[cfg(debug_assertions)]
+    let builder = match std::env::var_os("NURB_DESKTOP_DATA") {
+        Some(dir) => builder.with_filename(
+            PathBuf::from(dir)
+                .join(".window-state.json")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => builder,
+    };
+    builder.build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -370,18 +426,15 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_fs::init())
-        // Size, position and maximized only: restoring visibility or
-        // decorations would fight the overlay title bar and the hidden-window
-        // startup path.
-        .plugin(
-            tauri_plugin_window_state::Builder::new()
-                .with_state_flags(
-                    tauri_plugin_window_state::StateFlags::SIZE
-                        | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
-                )
-                .build(),
-        )
+        .plugin(window_state_plugin())
+        // Managed before the window exists, so a page that finishes loading
+        // before setup runs still finds it armed.
+        .manage(Reveal::default())
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main" && payload.event() == PageLoadEvent::Finished {
+                reveal(webview.app_handle());
+            }
+        })
         .manage(acp::Chats::new())
         .manage(claude::Drivers::new())
         .manage(agents::Logins::new())
@@ -421,6 +474,18 @@ pub fn run() {
             app.manage(prefs::PrefStore::load(&dir));
             app.manage(AppData(dir));
             install_menu(app.handle())?;
+            let hidden = app
+                .get_webview_window("main")
+                .is_some_and(|window| !window.is_visible().unwrap_or(true));
+            if hidden {
+                let app = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(REVEAL_DEADLINE);
+                    reveal(&app);
+                });
+            } else {
+                app.state::<Reveal>().0.store(false, Ordering::SeqCst);
+            }
             #[cfg(debug_assertions)]
             test_hook(app.handle().clone());
             Ok(())
